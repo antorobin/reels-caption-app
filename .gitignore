@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.DS_Store
+*.log
+
+# whisper.cpp model files are large binaries fetched separately — see
+# src-tauri/resources/models/README.md
+src-tauri/resources/models/*.bin

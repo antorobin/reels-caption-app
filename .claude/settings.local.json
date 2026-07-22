@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cargo --version)",
+      "PowerShell(rustc --version)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(node -e \"console.log\\(JSON.stringify\\(JSON.parse\\(require\\('fs'\\).readFileSync\\('src-tauri/tauri.conf.json'\\)\\), null, 2\\)\\)\")",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('src-tauri/capabilities/default.json'\\)\\); console.log\\('capabilities OK'\\)\")",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('package.json'\\)\\); console.log\\('package.json OK'\\)\")",
+      "PowerShell(winget search mingw --source winget 2>&1)",
+      "Bash(python3 -c \"from PIL import Image; print\\('PIL ok'\\)\")",
+      "Bash(magick -version)",
+      "Bash(convert -version)",
+      "Bash(node \"C:/Users/MARSHA~1/AppData/Local/Temp/claude/D--projects-claude-cowork-reels-caption-app/b55dc9d4-103d-4aa0-98d5-834e66e16e68/scratchpad/gen_icon.js\" \"C:/Users/MARSHA~1/AppData/Local/Temp/claude/D--projects-claude-cowork-reels-caption-app/b55dc9d4-103d-4aa0-98d5-834e66e16e68/scratchpad/app-icon.png\" 1024)",
+      "Bash(find \"/c/Users/MarshalAntonRobin\\(Na/AppData/Local/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\" -maxdepth 3 -iname \"bin\" 2>/dev/null)",
+      "Bash(find \"/c/Users/MarshalAntonRobin\\(Na/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\" -iname \"libgcc.a\" -o -iname \"libgcc_eh.a\" 2>/dev/null)",
+      "Bash(ffmpeg -version)",
+      "Bash(find \"/c/Users/MarshalAntonRobin\\(Na/AppData/Local/Microsoft/WinGet/Packages\" -maxdepth 1 -iname \"*ffmpeg*\" 2>/dev/null)",
+      "PowerShell(Get-Process -Name \"reels-caption-app\",\"node\",\"cargo\" -ErrorAction SilentlyContinue)",
+      "Bash(cd \"D:/projects/claude-cowork/whisper.cpp\" && cat models/download-ggml-model.sh | head -20)",
+      "Bash(sh ./models/download-ggml-model.sh base.en)",
+      "Bash(./build/bin/whisper-cli.exe --help)",
+      "Read(//c/mingw64/**)",
+      "Bash(cp \"/c/mingw64/bin/libdl.dll\" \"/d/projects/claude-cowork/whisper.cpp/build/bin/\")",
+      "Bash(rm -f \"/d/projects/claude-cowork/whisper.cpp/test-out.json\")",
+      "Bash(cp \"/d/projects/claude-cowork/whisper.cpp/models/ggml-base.en.bin\" \"/d/projects/claude-cowork/reels-caption-app/src-tauri/resources/models/ggml-base.en.bin\")",
+      "Bash(find \"/c/Users/MarshalAntonRobin\\(Na/.cargo/registry/src\" -maxdepth 2 -iname \"tauri-*\" 2>/dev/null | grep -v -- \"-macros\\\\|-plugin\\\\|-build\\\\|-utils\\\\|-codegen\\\\|-runtime\" )",
+      "PowerShell(Get-Process -Id 27352 -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Process -Name \"reels-caption-app\" -ErrorAction SilentlyContinue)",
+      "Bash(find \"/c/Windows/System32\" -maxdepth 1 -iname \"webview2loader.dll\" -o -maxdepth 1 -iname \"libgcc*\" -o -maxdepth 1 -iname \"libstdc++*\" -o -maxdepth 1 -iname \"libwinpthread*\" 2>/dev/null *)",
+      "Bash(cargo check *)",
+      "Bash(cargo test *)",
+      "Bash(mkdir -p \"/d/projects/claude-cowork/reels-caption-app/.claude\")"
+    ]
+  }
+}

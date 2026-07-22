@@ -1,0 +1,53 @@
+[package]
+name = "reels-caption-app"
+version = "0.1.0"
+description = "Local-first Reels caption tool - hello world scaffold"
+authors = ["you"]
+edition = "2021"
+
+# Normally ["staticlib", "cdylib", "rlib"] so the same crate builds for
+# desktop AND mobile (iOS needs staticlib, Android needs cdylib). Narrowed
+# to "rlib" here because building on the x86_64-pc-windows-gnu target (no
+# MSVC Build Tools in this environment) hits a known upstream limitation:
+# rustc's cdylib output on -windows-gnu auto-exports every `pub` symbol,
+# and Tauri's dependency tree produces ~92,700 of them — over the PE
+# format's hard 65,535-export limit. This is specific to GNU-on-Windows;
+# it doesn't happen on MSVC or on macOS/Linux (ELF/Mach-O have no such
+# limit), so it won't affect real iOS/Android builds. Restore
+# ["staticlib", "cdylib", "rlib"] before cross-compiling for iOS/Android,
+# or when building on this project with the MSVC toolchain instead.
+[lib]
+name = "reels_caption_app_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0.0", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2.0.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Async subprocess handling for ffmpeg/whisper-cli, so long-running jobs
+# don't block the webview's UI thread. Tauri already runs its own tokio
+# runtime under the hood; this just lets our commands hook into it.
+tokio = { version = "1", features = ["process", "io-util"] }
+
+# NOT YET ADDED: `whisper-rs` (see README "Suggested next build steps" #1).
+# It compiles whisper.cpp from C/C++ source via `cmake` in its build script,
+# so pulling it in requires a working cmake + C/C++ toolchain to even test
+# a `cargo check`. `check_whisper`/the pipeline below still shell out to the
+# `whisper-cli` binary (README section 2) — swap that subprocess call for
+# `whisper-rs` when you're ready to unify desktop + mobile.
+
+[features]
+# this feature is used for production builds where `devPath` points to the filesystem
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
