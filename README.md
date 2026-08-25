@@ -1049,15 +1049,26 @@ and the Qwen2.5-0.5B-Instruct model:
 None of this changes `tauri dev` — an empty `resources/bin/` just means
 this step falls back to PATH, same as before.
 
-**The `stt` conda env is not bundled** (unlike the old MFA "aligner" env,
-which could be `conda-pack`ed into the installer). Its dependency surface
-is much lighter than it used to be — dropping WhisperX (see section 2.2)
-means it's just `faster-whisper`, `onnx-asr`, and `soundfile` now, no
-PyTorch/transformers/torchaudio — but end users still need a system conda
-`stt` env set up per section 2 above. This is a real regression in "zero
+**Superseded by `npm run fetch-resources` (section 3.1) and the "Build &
+distribute" section (6.1)**: run `npm run fetch-resources` before this
+build to populate `resources/bin/`, `resources/llama/`, and
+`resources/tts-models/en/` in one shot instead of the manual per-file
+drop described above — `tauri build` then bundles whatever it finds there
+automatically, no separate steps needed.
+
+**The `stt`/`tts`/`media-ai`/`voice-clone` conda environments are still
+not bundled** (unlike the old MFA "aligner" env, which could be
+`conda-pack`ed into the installer) — end users still need a system conda
+env set up per sections 2/2.4/2.6/2.7. This is a real regression in "zero
 end-user setup" versus what the old MFA-bundling path offered; worth
-revisiting `conda-pack` now that the dependency list is small enough to
-make that more practical than it was before.
+revisiting `conda-pack` now that `stt`'s own dependency surface is lighter
+than it used to be (dropping WhisperX, section 2.2, leaves just
+`faster-whisper`, `onnx-asr`, and `soundfile` — no PyTorch/transformers/
+torchaudio for that one env specifically). Model *files* are a separate,
+now-solved problem — see 6.1's "In-app model download": the Tamil
+transcription and voice-cloning checkpoints fetch themselves on demand,
+it's specifically the Python packages/environments that still need
+manual setup.
 
 ---
 
@@ -1142,12 +1153,12 @@ Done in this scaffold:
 - ~~Fix the live preview playing the video's original audio underneath an active voiceover.~~ — `VideoPreview.jsx`'s `<video muted={!!voiceoverPath}>` only took effect at the element's initial mount, a documented React special-case for media elements (the `muted` JSX prop isn't re-applied to the DOM node on later re-renders) — since a voiceover is normally generated well after the video element already exists, the mute never actually landed. Fixed with an effect that sets `videoRef.current.muted` imperatively whenever `voiceoverPath` changes. The burned/exported file was never affected — that's ffmpeg re-encoding the audio track directly, not this preview element.
 - ~~Make a fresh clone actually buildable without hunting down every model/binary by hand.~~ — `npm run fetch-resources` (`scripts/fetch-dev-resources.mjs`) downloads one ~1.1GB archive from this repo's GitHub Release and unpacks it into `src-tauri/resources/`, section 3.1. Also cleaned up real repo hygiene issues found along the way: OpenVoice's `se_extractor` was caching scratch audio/embeddings into a relative `processed/` directory that landed inside the working tree and got committed (`clone_voice.py` now pins it to a temp directory instead — see `voice_clone.rs`'s section 2.7); Git LFS was tried first for the large model files but dropped in favor of the release-asset approach once its per-clone bandwidth billing turned out to cost more than plain storage, given these files never change.
 - ~~Let an installed app fetch the models it's missing, instead of a manual conda/curl dance.~~ — new `model_fetch.rs` + `shell/OptionalModelsBanner.jsx`: a one-click in-app download of a dedicated, smaller release asset (`optional-models.tar.gz`, Tamil transcription + voice cloning checkpoints only) into the same per-machine cache dir the app already falls back to. Deliberately not done inside the MSI installer itself — considered and rejected, since MSI's transactional install model handles long network operations poorly — section 6.1's "In-app model download."
+- ~~Sidecar-bundle `ffmpeg` itself so users don't need it on PATH.~~ — achieved via `bin_paths.rs`'s resources-based bundling (env var override → bundled resource → PATH fallback) rather than Tauri's dedicated [sidecar API](https://v2.tauri.app/develop/sidecar/) specifically — the practical goal (no PATH dependency in a built installer) is met either way; `npm run fetch-resources`/the installer's `bundle.resources` (`tauri.conf.json`) is what actually gets `ffmpeg.exe`/`ffprobe.exe` into every build, section 3.1.
 
 Still open:
-1. Sidecar-bundle `ffmpeg` itself (https://v2.tauri.app/develop/sidecar/) so users don't need it on PATH.
-2. Real-time WYSIWYG caption preview over the actual video frame, not just the style swatch.
-3. A path to bundling the `stt` conda env for zero end-user setup — see section 8.1's regression note (llama.cpp/Qwen2.5-0.5B-Instruct is already bundled; the STT engines' env is the piece still missing this).
-4. More Indian languages in `stt::INDIC_LANGUAGES` beyond Tamil — see `resources/stt-models/README.md`.
+1. Live preview doesn't yet replicate every *burn animation* (karaoke fill, pop, bounce, typewriter, per-word highlight, slide, zoom, fade) — `VideoPreview.jsx` already shows real captions, live, correctly positioned and timed over the actual video frame (not a static style swatch), and cascade mode's per-word size/color pop is matched exactly, but classic mode's `animation` setting only affects the final burned output today; the live preview shows plain styled text for all of them.
+2. A path to bundling the `stt`/`tts`/`media-ai`/`voice-clone` conda *environments* themselves for zero end-user setup — see section 8.1's regression note. This is now a narrower gap than it used to be: `npm run fetch-resources` (developers) and the in-app "Download now" banner (installed end users, section 6.1) already handle every large model *file*, including the two that used to require a manual per-machine setup (Tamil transcription, voice cloning). What's left is specifically the Python packages/environments (torch, transformers, faster-whisper, openvoice, mediapipe, librosa, ...) — `conda-pack` is worth revisiting now that `stt`'s own dependency surface is lighter than it used to be.
+3. More Indian languages in `stt::INDIC_LANGUAGES`/`tts::TTS_INDIC_LANGUAGES` beyond Tamil — see `resources/stt-models/README.md`. Extending the auto-detection language list (section 7) is the same piece of work now that language selection is automatic rather than a dropdown.
 
 Everything above runs 100% locally — `llama-server.exe` is a *local* HTTP
 server bound to `127.0.0.1` only, not a remote one, so this is still
