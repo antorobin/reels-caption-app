@@ -31,6 +31,7 @@ mod jumpcuts;
 mod llm;
 mod loudness;
 mod media_ai;
+mod model_fetch;
 mod pipeline;
 mod proc_cleanup;
 mod segments;
@@ -118,6 +119,9 @@ pub fn run() {
             ducking::duck_music,
             jumpcuts::remove_silence_and_fillers,
             loudness::normalize_audio,
+            model_fetch::check_optional_models,
+            model_fetch::optional_models_missing,
+            model_fetch::download_optional_models,
             stt::get_supported_languages,
             tts::generate_voiceover,
             util::fingerprint_video_file,

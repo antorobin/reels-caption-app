@@ -93,6 +93,47 @@ reels-caption-app/
 └── vite.config.js
 ```
 
+## Quick start: setting up a new dev workstation
+
+Everything below is documented in full in its own section — this is the
+ordered checklist so a fresh machine doesn't need to read the whole README
+front-to-back to know what to run. Each step links to the section with the
+real detail (troubleshooting, why it's built this way, what's optional).
+
+1. **Install prerequisites** — Node.js 18+, Rust, and your OS's Tauri
+   build tools (section 1).
+2. **Clone the repo, install JS dependencies:**
+   ```bash
+   git clone https://github.com/antorobin/reels-caption-app.git
+   cd reels-caption-app
+   npm install
+   ```
+   (section 3)
+3. **Fetch the bundled binaries/models in one shot:**
+   ```bash
+   npm run fetch-resources
+   ```
+   Pulls ffmpeg, llama.cpp + the local LLM, Piper's English voice, the
+   Tamil Whisper checkpoint, and the OpenVoice checkpoint from this repo's
+   GitHub Release — no separate downloads to go hunt down (section 3.1).
+4. **Set up the conda environments** for whichever features you need —
+   these install actual Python packages, not just files, so
+   `fetch-resources` can't do this part:
+   - `stt` (required for any transcription) — section 2
+   - `tts` (voiceover generation) — section 2.6
+   - `media-ai` (voice-over sync, vocal emphasis, speaker diarization) — section 2.4
+   - `voice-clone` (matching a generated voiceover to the original speaker) — section 2.7
+5. **Configure Firebase auth** — required; this is the app's first screen,
+   nothing else works until this is set up (section 4).
+6. **Run it:**
+   ```bash
+   npm run tauri dev
+   ```
+   (section 5)
+
+That's a working dev setup. Building a distributable installer (`.msi`/
+`.dmg`/`.AppImage`) is a separate, later step — section 6.1.
+
 ## 1. Install prerequisites (once, on your dev machine)
 
 - **Node.js** 18+ — https://nodejs.org
@@ -838,17 +879,59 @@ outgrows manual per-OS builds.
 ### What a fresh install actually gets you
 
 The installer bundles ffmpeg/ffprobe, the local LLM (llama.cpp +
-Qwen2.5-0.5B-Instruct), Piper's English voices, and the Tamil font —
-**everything needed for caption styling/burning and title/hashtag
-generation works immediately after install, no setup.** Speech-to-text,
-voiceover generation, and voice cloning need their conda environments set
-up separately by whoever's testing (sections 2, 2.4, 2.6, 2.7) — those
-models are large and per-language/per-feature, so they're deliberately
-not bundled into the installer (same reasoning as the Indic Whisper
-checkpoints in `resources/stt-models/README.md`). Worth saying plainly to
-anyone you hand this to: **installing the MSI alone does not give you
-working transcription** — mention the conda setup steps, or they'll hit
-"STT engine not found" the moment they upload a video.
+Qwen2.5-0.5B-Instruct), Piper's English voice, and the Tamil font —
+**English caption styling/burning, silence removal, English voiceover, and
+title/hashtag generation all work immediately after install, no setup.**
+
+**Tamil transcription and voice cloning** need one more model download
+(the Tamil Whisper checkpoint + the OpenVoice converter checkpoint, ~360MB
+combined) that's deliberately not baked into the installer — see "In-app
+model download" below, which handles this with one click, no terminal
+required. **Every conda environment (`stt`/`tts`/`media-ai`/
+`voice-clone`) is still a manual, per-machine setup step** (sections 2,
+2.4, 2.6, 2.7) regardless of that download — those need real Python
+packages installed (torch, transformers, faster-whisper, openvoice...),
+a meaningfully bigger scope (bundling a whole Python distribution) this
+project has deliberately kept out of the installer. Worth saying plainly
+to anyone you hand this to: **installing the MSI alone does not give you
+working transcription of any language** — mention the conda setup steps,
+or they'll hit "STT engine not found" the moment they upload a video.
+
+### In-app model download (Tamil transcription + voice cloning)
+
+`model_fetch.rs` checks, on app load, whether the Tamil Whisper checkpoint
+and the OpenVoice converter checkpoint already exist under
+`~/.reels-caption-app/` — the same per-machine fallback location
+`stt::indic_model_dir`/`voice_clone::voice_clone_checkpoint_dir` already
+check as their last resort. If either is missing, `shell/
+OptionalModelsBanner.jsx` shows a small dismissible prompt (bottom-left,
+mirroring Burn & Export's bottom-right dock) with a "Download now" button.
+
+This fetches a **separate, smaller release asset**
+(`optional-models.tar.gz`, ~335MB) from the same GitHub Release as the
+installer itself — deliberately not the ~1.1GB `dev-resources.tar.gz`
+developers use (section 3.1), which also re-bundles ffmpeg/llama/Piper
+that an installed app already has; re-downloading those here would be
+pure waste. Extraction shells out to the system `tar` (bundled with
+Windows 10+/macOS/Linux), same reasoning as `fetch-dev-resources.mjs`.
+
+**Why the installer itself doesn't do this download** (a real option that
+was considered): MSI's transactional install model handles long network
+operations poorly — a stalled multi-hundred-MB download partway through
+can leave the whole install in an awkward rollback state, it often runs
+without the user's normal network/proxy context, and antivirus/corporate
+policies commonly flag installers that reach the network mid-install. A
+first-run in-app download avoids all of that: the app launches
+immediately regardless of network state, and the download reuses the same
+progress-event pattern already used for transcription/burning elsewhere
+in this app.
+
+**Publishing a new release**: keep `optional-models.tar.gz` and
+`dev-resources.tar.gz` both up to date as separate assets — `gh release
+upload <tag> optional-models.tar.gz dev-resources.tar.gz --clobber`. The
+in-app downloader always fetches from `.../releases/latest/download/...`,
+so it automatically picks up whatever the newest release's asset is —
+no version string to update in code.
 
 ### Before a real public release
 
@@ -1058,6 +1141,7 @@ Done in this scaffold:
 - ~~Make a generated voiceover actually sound like the original speaker, not just a fixed default voice.~~ — OpenVoice V2's `ToneColorConverter` (new `voice_clone.rs`, its own conda env) reshapes the synthesized clip's timbre to match a reference clip pulled from the loaded video, falling back to a gender-matched Piper voice or the plain default when cloning isn't possible — `tts.rs`'s `resolve_voice_reference`/`generate_voiceover`, section 2.7.
 - ~~Fix the live preview playing the video's original audio underneath an active voiceover.~~ — `VideoPreview.jsx`'s `<video muted={!!voiceoverPath}>` only took effect at the element's initial mount, a documented React special-case for media elements (the `muted` JSX prop isn't re-applied to the DOM node on later re-renders) — since a voiceover is normally generated well after the video element already exists, the mute never actually landed. Fixed with an effect that sets `videoRef.current.muted` imperatively whenever `voiceoverPath` changes. The burned/exported file was never affected — that's ffmpeg re-encoding the audio track directly, not this preview element.
 - ~~Make a fresh clone actually buildable without hunting down every model/binary by hand.~~ — `npm run fetch-resources` (`scripts/fetch-dev-resources.mjs`) downloads one ~1.1GB archive from this repo's GitHub Release and unpacks it into `src-tauri/resources/`, section 3.1. Also cleaned up real repo hygiene issues found along the way: OpenVoice's `se_extractor` was caching scratch audio/embeddings into a relative `processed/` directory that landed inside the working tree and got committed (`clone_voice.py` now pins it to a temp directory instead — see `voice_clone.rs`'s section 2.7); Git LFS was tried first for the large model files but dropped in favor of the release-asset approach once its per-clone bandwidth billing turned out to cost more than plain storage, given these files never change.
+- ~~Let an installed app fetch the models it's missing, instead of a manual conda/curl dance.~~ — new `model_fetch.rs` + `shell/OptionalModelsBanner.jsx`: a one-click in-app download of a dedicated, smaller release asset (`optional-models.tar.gz`, Tamil transcription + voice cloning checkpoints only) into the same per-machine cache dir the app already falls back to. Deliberately not done inside the MSI installer itself — considered and rejected, since MSI's transactional install model handles long network operations poorly — section 6.1's "In-app model download."
 
 Still open:
 1. Sidecar-bundle `ffmpeg` itself (https://v2.tauri.app/develop/sidecar/) so users don't need it on PATH.

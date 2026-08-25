@@ -1083,6 +1083,39 @@ footer {
   cursor: not-allowed;
 }
 
+.optional-models-banner {
+  position: fixed;
+  left: 24px;
+  bottom: 24px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--shell-bg-1);
+  border: 1px solid var(--shell-border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  max-width: 320px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.optional-models-banner-text {
+  font-size: 12.5px;
+  color: var(--shell-text-dim);
+  margin: 0;
+}
+
+.optional-models-banner-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.optional-models-banner-dismiss {
+  background: transparent;
+  border: 1px solid var(--shell-border);
+  color: var(--shell-text-dim);
+}
+
 .hashtag-chip-row {
   display: flex;
   flex-wrap: wrap;

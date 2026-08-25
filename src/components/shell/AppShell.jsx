@@ -1,6 +1,7 @@
 import BurnExportButton from "./BurnExportButton.jsx";
 import MainPanel from "./MainPanel.jsx";
 import MenuBar from "./MenuBar.jsx";
+import OptionalModelsBanner from "./OptionalModelsBanner.jsx";
 import Sidebar from "./Sidebar.jsx";
 import TranscriptPanel from "./TranscriptPanel.jsx";
 
@@ -57,6 +58,8 @@ function AppShell(props) {
         burnStatus={props.burnStatus}
         disabled={props.words.length === 0}
       />
+
+      <OptionalModelsBanner />
     </div>
   );
 }

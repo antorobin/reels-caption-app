@@ -42,8 +42,14 @@ serde_json = "1.0"
 # runtime under the hood; this just lets our commands hook into it.
 tokio = { version = "1", features = ["process", "io-util", "sync"] }
 # Talks to the bundled llama-server.exe's local HTTP completion API (see
-# llm.rs) -- plain http:// to 127.0.0.1 only, so TLS backends are disabled.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# llm.rs, plain http:// to 127.0.0.1 only) AND fetches optional model
+# checkpoints from this repo's GitHub Release over HTTPS (see
+# model_fetch.rs) -- "rustls-tls" over the default "native-tls" backend
+# specifically to avoid depending on a system OpenSSL install, matching
+# this project's general preference for self-contained builds. "stream"
+# enables incremental (not fully-buffered) download writes for the
+# ~360MB optional-models archive.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 [features]
 # this feature is used for production builds where `devPath` points to the filesystem

@@ -4,6 +4,8 @@ const STAGE_LABELS = {
   extracting_audio: "Extracting audio",
   transcribing: "Transcribing & aligning",
   burning: "Burning captions",
+  downloading: "Downloading",
+  extracting: "Extracting",
 };
 
 export function formatElapsed(seconds) {
