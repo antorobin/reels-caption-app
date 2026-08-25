@@ -2,33 +2,64 @@
 // and the mobile targets (iOS/Android) call `run()` from here.
 //
 // IMPORTANT MOBILE NOTE:
-// `check_ffmpeg` and `check_whisper` below use `std::process::Command` to
-// call external binaries. This works fine on macOS, Windows, and Linux,
-// where ffmpeg/whisper.cpp are installed on the system or bundled as
-// "sidecar" executables.
+// `check_ffmpeg` below uses `std::process::Command` to call an external
+// binary. This works fine on macOS, Windows, and Linux, where ffmpeg is
+// installed on the system or bundled as a "sidecar" executable.
 //
 // On iOS and Android, spawning subprocesses / running arbitrary CLI
 // binaries is NOT allowed by the OS sandbox. To make this feature work
-// on mobile you'd need to:
-//   1. Compile ffmpeg and whisper.cpp as static/dynamic libraries
-//      (e.g. via ffmpeg-kit for mobile, and whisper.cpp's C API).
-//   2. Write Rust FFI bindings (or use existing crates like `whisper-rs`)
-//      to call them as in-process functions instead of subprocesses.
-//   3. Swap the body of these commands to call those bindings when
-//      compiled for `target_os = "ios"` or `target_os = "android"`.
+// on mobile you'd need to compile ffmpeg as a static/dynamic library
+// (e.g. via ffmpeg-kit for mobile) and write Rust FFI bindings to call
+// it in-process instead of as a subprocess, swapping the body of this
+// command when compiled for `target_os = "ios"` or `target_os =
+// "android"`.
+//
+// Transcription (see stt.rs) is conda/Python-based and was never
+// mobile-compatible to begin with — no FFI path exists for it today.
 //
 // The command signatures and the React UI stay identical either way —
 // only the implementation inside each command changes per platform.
 
+mod bin_paths;
 mod captions;
+mod conda_util;
+mod content_ideas;
+mod diarize;
+mod ducking;
 mod ffmpeg;
 mod jumpcuts;
-mod model;
+mod llm;
+mod loudness;
+mod media_ai;
 mod pipeline;
+mod proc_cleanup;
 mod segments;
+mod slang;
+mod stt;
+mod tts;
 mod util;
+mod voice_clone;
+mod vosync;
 
 use std::process::Command;
+use tauri::Manager;
+
+/// Called by the frontend once it's actually mounted and painted (see
+/// `App.jsx`'s startup effect) — swaps the splashscreen window (shown
+/// natively the instant the process starts, so there's no blank-window
+/// flash while the webview spins up) for the real main window, rather
+/// than showing the main window immediately and letting the user watch
+/// it render.
+#[tauri::command]
+fn close_splashscreen(app: tauri::AppHandle) {
+    if let Some(splash) = app.get_webview_window("splashscreen") {
+        let _ = splash.close();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
+}
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -37,13 +68,14 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn check_ffmpeg() -> Result<String, String> {
-    // Desktop: shells out to the system/bundled ffmpeg binary.
+    // Desktop: shells out to the bundled (or PATH-resolved) ffmpeg binary
+    // — see bin_paths.rs.
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
-        let output = Command::new("ffmpeg")
+        let output = Command::new(bin_paths::ffmpeg_path())
             .arg("-version")
             .output()
-            .map_err(|e| format!("ffmpeg not found on PATH: {}", e))?;
+            .map_err(|e| format!("ffmpeg not found: {}", e))?;
 
         let text = String::from_utf8_lossy(&output.stdout);
         let first_line = text.lines().next().unwrap_or("ffmpeg found, version unknown");
@@ -59,47 +91,38 @@ fn check_ffmpeg() -> Result<String, String> {
     }
 }
 
-#[tauri::command]
-fn check_whisper() -> Result<String, String> {
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    {
-        // Expects a `whisper-cli` (or `main`, depending on your whisper.cpp
-        // build) binary available on PATH, or bundled as a Tauri "sidecar".
-        // See README for how to build whisper.cpp and point this at it.
-        let output = Command::new("whisper-cli")
-            .arg("--help")
-            .output();
-
-        match output {
-            Ok(out) => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                let first_line = text.lines().next().unwrap_or("whisper-cli found");
-                Ok(first_line.to_string())
-            }
-            Err(e) => Err(format!(
-                "whisper-cli not found on PATH ({}). Build whisper.cpp and add it to PATH — see README.",
-                e
-            )),
-        }
-    }
-
-    #[cfg(any(target_os = "ios", target_os = "android"))]
-    {
-        Ok("whisper check is a no-op on mobile in this scaffold — wire up whisper-rs FFI here.".to_string())
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            bin_paths::init(app.handle());
+            // Order matters: clear out anything orphaned by a *previous*
+            // run first, then set up the job object that keeps *this*
+            // run's own children from ever doing the same.
+            proc_cleanup::kill_orphaned_processes(&[bin_paths::ffmpeg_path(), bin_paths::ffprobe_path()]);
+            proc_cleanup::init_kill_on_exit();
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            close_splashscreen,
             greet,
             check_ffmpeg,
-            check_whisper,
             pipeline::run_pipeline,
+            pipeline::transcribe_audio_file,
             captions::burn_captions,
+            captions::analyze_prosody,
+            content_ideas::generate_content_ideas,
+            diarize::diarize_speakers,
+            ducking::duck_music,
             jumpcuts::remove_silence_and_fillers,
+            loudness::normalize_audio,
+            stt::get_supported_languages,
+            tts::generate_voiceover,
+            util::fingerprint_video_file,
+            vosync::compute_voiceover_offset,
+            vosync::sync_voice_over,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

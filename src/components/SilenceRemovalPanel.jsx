@@ -21,7 +21,7 @@ function SilenceRemovalPanel({ videoPath, words, onApplied }) {
       const result = await invoke("remove_silence_and_fillers", {
         videoPath,
         words,
-        options: { minSilenceSeconds, removeFillerWords },
+        options: { min_silence_seconds: minSilenceSeconds, remove_filler_words: removeFillerWords },
       });
       const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
       setStatus(

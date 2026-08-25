@@ -5,6 +5,26 @@ src-tauri/gen/
 .DS_Store
 *.log
 
-# whisper.cpp model files are large binaries fetched separately — see
-# src-tauri/resources/models/README.md
-src-tauri/resources/models/*.bin
+# Per-developer Firebase project config — see .env.example.
+.env
+
+# Bundled ffmpeg binaries — fetched/copied locally per
+# src-tauri/resources/bin/README.md, not vendored into git.
+src-tauri/resources/bin/*.exe
+src-tauri/resources/bin/*.dll
+
+# Bundled llama.cpp binaries + the Qwen2.5-0.5B-Instruct GGUF model —
+# fetched locally, not vendored into git (see README's LLM service setup
+# section).
+src-tauri/resources/llama/*.exe
+src-tauri/resources/llama/*.dll
+src-tauri/resources/llama/*.gguf
+
+# Converted Indic Whisper checkpoints — large, per-language, fetched and
+# converted locally (see src-tauri/resources/stt-models/README.md).
+src-tauri/resources/stt-models/*/
+
+# Bundled Piper voice for English TTS — fetched locally, not vendored into
+# git (see README's voiceover setup section).
+src-tauri/resources/tts-models/en/*.onnx
+src-tauri/resources/tts-models/en/*.onnx.json

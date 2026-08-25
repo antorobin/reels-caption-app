@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 const STAGE_LABELS = {
   extracting_audio: "Extracting audio",
-  transcribing: "Transcribing",
+  transcribing: "Transcribing & aligning",
   burning: "Burning captions",
 };
 

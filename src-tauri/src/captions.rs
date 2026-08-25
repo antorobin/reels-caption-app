@@ -6,14 +6,64 @@
 // make TikTok-style caption presets possible without generating one
 // drawtext filter per word.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::AppHandle;
 
+use crate::diarize::SpeakerSegment;
 use crate::ffmpeg::{best_encoder, probe_duration_seconds, run_with_progress};
 use crate::pipeline::WordTimestamp;
 use crate::segments::{burn_captions_segmented, recommended_segment_count};
-use crate::util::{cli_path, unique_temp_path};
+use crate::util::{cli_path, unique_temp_path, verify_transcript_is_fresh};
+
+/// Fixed per-speaker accent-color palette for the cascade active-word
+/// pop, used in place of `style.accent_color` when diarization data is
+/// available — indexed by `speaker_id % SPEAKER_COLORS.len()`.
+const SPEAKER_COLORS: &[&str] = &["#FFE600", "#00E5FF", "#FF4D8D", "#7CFF6B"];
+
+/// Which speaker (if any) is talking at `time`, based on the segment
+/// that contains it.
+fn speaker_id_at(speakers: &[SpeakerSegment], time: f64) -> Option<u8> {
+    speakers.iter().find(|s| time >= s.start && time < s.end).map(|s| s.speaker_id)
+}
+
+/// Per-word vocal-emphasis bucket from `analyze_prosody` (audio-only —
+/// RMS energy percentiles within this clip, see media_ai/prosody.py).
+/// Fresh, minimal type local to this module — not the deleted vision
+/// feature's `Intensity`, which was per-segment and description-derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WordIntensity {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProsodyWord {
+    pub start: f64,
+    pub end: f64,
+    pub intensity: WordIntensity,
+}
+
+/// How close (in seconds) a rendered word's own start time must be to a
+/// `ProsodyWord`'s start to count as "the same word" — timestamps can
+/// drift slightly between when prosody was analyzed and when captions
+/// are burned (e.g. the transcript was hand-edited in between).
+const PROSODY_MATCH_TOLERANCE_SECONDS: f64 = 0.05;
+
+/// Nearest-start-time prosody match for a word being rendered at `time`.
+/// Defaults to `Medium` (the original fixed-scale behavior) when no
+/// prosody data is available or nothing matches closely enough —
+/// including whenever `prosody` is empty.
+fn prosody_intensity_at(prosody: &[ProsodyWord], time: f64) -> WordIntensity {
+    prosody
+        .iter()
+        .filter(|p| (p.start - time).abs() <= PROSODY_MATCH_TOLERANCE_SECONDS)
+        .min_by(|a, b| (a.start - time).abs().partial_cmp(&(b.start - time).abs()).unwrap())
+        .map(|p| p.intensity)
+        .unwrap_or(WordIntensity::Medium)
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CaptionStyle {
@@ -22,7 +72,8 @@ pub struct CaptionStyle {
     pub text_color: String,    // "#RRGGBB"
     pub outline_color: String, // "#RRGGBB"
     pub position: String,      // "bottom" | "middle" | "top"
-    // "none" | "fade" | "pop" | "karaoke" | "bounce" | "typewriter" | "highlight"
+    // "none" | "fade" | "pop" | "karaoke" | "bounce" | "typewriter" | "highlight" | "slide" | "zoom"
+    // (ignored in cascade mode — its per-word spotlight is always on, see build_cascade_text)
     pub animation: String,
     #[serde(default = "default_words_per_line")]
     pub words_per_line: usize,
@@ -74,47 +125,6 @@ fn default_background_opacity() -> f32 {
     70.0
 }
 
-/// A user-placed piece of text pinned to a specific time range — separate
-/// from the auto-generated transcript captions (e.g. a "SALE!" sticker or
-/// "link in bio" callout at a chosen moment), with its own independent
-/// styling and (like transcript captions) its own animation preset.
-/// Rendered on ASS layer 1 (vs. the transcript captions' layer 0) so it
-/// always draws on top if the two overlap in time.
-#[derive(Debug, Clone, Deserialize)]
-pub struct CustomTextOverlay {
-    pub id: String,
-    pub text: String,
-    pub start: f64,
-    pub end: f64,
-    pub position: String, // "bottom" | "middle" | "top"
-    pub font_family: String,
-    pub font_size: u32,
-    pub text_color: String,    // "#RRGGBB"
-    pub outline_color: String, // "#RRGGBB"
-    #[serde(default = "default_animation")]
-    pub animation: String,
-    #[serde(default)]
-    pub bold: bool,
-    #[serde(default)]
-    pub italic: bool,
-    #[serde(default)]
-    pub letter_spacing: f32,
-    #[serde(default = "default_text_transform")]
-    pub text_transform: String,
-    #[serde(default = "default_background")]
-    pub background: String,
-    #[serde(default = "default_background_color")]
-    pub background_color: String,
-    #[serde(default = "default_background_opacity")]
-    pub background_opacity: f32,
-    #[serde(default)]
-    pub shadow_size: f32,
-}
-
-fn default_animation() -> String {
-    "none".to_string()
-}
-
 /// "#RRGGBB" -> ASS's "&HAABBGGRR" (blue-green-red order; ASS alpha is
 /// inverted from normal "opacity" — 00 = fully opaque, FF = fully
 /// transparent).
@@ -157,6 +167,26 @@ fn ass_margin_v(position: &str) -> u32 {
         "middle" => 0,
         _ => 60,
     }
+}
+
+const PLAY_RES_X: f64 = 1920.0;
+const PLAY_RES_Y: f64 = 1080.0;
+
+/// Approximate anchor point for `position`+`margin_v`, used by the "slide"
+/// animation's `\move`. `\move` takes full control of a line's position —
+/// it doesn't compose with the Style's alignment/margin auto-placement —
+/// so this reproduces where that auto-placement would have put it, close
+/// enough that the line settles in the same spot "none"/"fade"/etc. do,
+/// just arrived at via a slide. `ass_alignment` only ever produces 2/5/8
+/// (center-column), so horizontal center (PlayResX/2) is always correct.
+fn ass_move_target(position: &str, margin_v: u32) -> (f64, f64) {
+    let x = PLAY_RES_X / 2.0;
+    let y = match position {
+        "top" => margin_v as f64,
+        "middle" => PLAY_RES_Y / 2.0,
+        _ => PLAY_RES_Y - margin_v as f64, // bottom
+    };
+    (x, y)
 }
 
 fn ass_timestamp(seconds: f64) -> String {
@@ -232,35 +262,72 @@ fn build_style_line(
     ))
 }
 
-/// Splits `text` into evenly-timed word spans across `[start, end]`. Used
-/// to give custom overlays (which only have one start/end for their whole
-/// text) the same per-word timing structure transcript caption chunks
-/// have, so both can share the same word-level animation code.
-fn synthesize_word_spans(text: &str, start: f64, end: f64) -> Vec<WordTimestamp> {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.is_empty() {
-        return Vec::new();
-    }
-    let span = (end - start).max(0.01);
-    let step = span / words.len() as f64;
-    words
-        .iter()
-        .enumerate()
-        .map(|(i, w)| WordTimestamp { word: (*w).to_string(), start: start + step * i as f64, end: start + step * (i as f64 + 1.0) })
-        .collect()
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PhraseBreak {
+    None,
+    Clause,   // , ; :
+    Sentence, // . ? !
 }
 
-fn group_words_into_lines(words: &[WordTimestamp], words_per_line: usize) -> Vec<&[WordTimestamp]> {
-    let words_per_line = words_per_line.max(1);
-    words.chunks(words_per_line).collect()
+fn classify_punctuation(word: &str) -> Option<PhraseBreak> {
+    match word {
+        "." | "?" | "!" => Some(PhraseBreak::Sentence),
+        "," | ";" | ":" => Some(PhraseBreak::Clause),
+        _ => None,
+    }
+}
+
+/// WhisperX emits sentence/clause punctuation (`.` `,` `?` `!` `;` `:`)
+/// as their own word-timestamp entries. Left alone, mechanical N-word
+/// chunking treats a lone "." as a word and can orphan it at the start of
+/// the next line. This merges each punctuation token onto the word before
+/// it (extending that word's end time to cover it) and records what kind
+/// of break follows — the signal `group_words_into_phrases` breaks on.
+fn merge_punctuation(words: &[WordTimestamp]) -> Vec<(WordTimestamp, PhraseBreak)> {
+    let mut merged: Vec<(WordTimestamp, PhraseBreak)> = Vec::new();
+    for w in words {
+        if let Some(break_kind) = classify_punctuation(&w.word) {
+            if let Some(last) = merged.last_mut() {
+                last.0.word.push_str(&w.word);
+                last.0.end = w.end;
+                last.1 = break_kind;
+            }
+            // Punctuation with nothing preceding it can't attach anywhere — drop it.
+            continue;
+        }
+        merged.push((w.clone(), PhraseBreak::None));
+    }
+    merged
+}
+
+/// Groups words into caption chunks at sentence/clause punctuation instead
+/// of a blind word count, so a chunk boundary lands where the sentence
+/// actually pauses. `max_words` is still a hard cap — fast, comma-free
+/// speech (common in real transcripts) can run many words between any
+/// punctuation at all, so this is a "break early if there's a natural
+/// place to, otherwise don't run on forever" rule rather than true
+/// semantic phrase selection.
+fn group_words_into_phrases(words: &[WordTimestamp], max_words: usize) -> Vec<Vec<WordTimestamp>> {
+    let max_words = max_words.max(1);
+    let mut chunks = Vec::new();
+    let mut current: Vec<WordTimestamp> = Vec::new();
+    for (word, break_kind) in merge_punctuation(words) {
+        current.push(word);
+        if break_kind != PhraseBreak::None || current.len() >= max_words {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 /// Renders one caption line's text with `animation` applied to `words`
 /// (already text-transformed). `\t`/`\k` timing tags are relative to the
 /// dialogue event's own Start, so every offset here is computed relative
-/// to `words[0].start`, regardless of whether `words` came from real
-/// transcript timestamps or [`synthesize_word_spans`].
-fn build_animated_text(words: &[WordTimestamp], animation: &str, text_transform: &str) -> String {
+/// to `words[0].start`.
+fn build_animated_text(words: &[WordTimestamp], animation: &str, text_transform: &str, position: &str) -> String {
     if words.is_empty() {
         return String::new();
     }
@@ -288,6 +355,26 @@ fn build_animated_text(words: &[WordTimestamp], animation: &str, text_transform:
         // Whole line overshoots past full size then settles — a spring/bounce feel.
         "bounce" => format!(
             "{{\\fscx60\\fscy60\\t(0,120,\\fscx115\\fscy115)\\t(120,220,\\fscx100\\fscy100)}}{}",
+            escape_ass_text(&joined())
+        ),
+
+        // Slides in from just off its resting position (direction depends
+        // on `position` — down into a top caption, up into a bottom one)
+        // with a quick fade, rather than popping in place.
+        "slide" => {
+            let margin_v = ass_margin_v(position);
+            let (x, y) = ass_move_target(position, margin_v);
+            let from_y = if position == "top" { y - 60.0 } else { y + 60.0 };
+            format!(
+                "{{\\move({x},{from_y},{x},{y})\\alpha&HFF&\\t(0,220,\\alpha&H00&)}}{}",
+                escape_ass_text(&joined())
+            )
+        }
+
+        // Opposite of "pop": starts oversized and slightly transparent,
+        // settles down to full size and opacity — a camera-zoom-out feel.
+        "zoom" => format!(
+            "{{\\fscx160\\fscy160\\alpha&H80&\\t(0,180,\\fscx100\\fscy100\\alpha&H00&)}}{}",
             escape_ass_text(&joined())
         ),
 
@@ -333,46 +420,105 @@ fn build_animated_text(words: &[WordTimestamp], animation: &str, text_transform:
     }
 }
 
-/// The "previous chunk" line in cascade mode shrinks to this fraction of
-/// `font_size` — tuned by eye against the reference "big word" preset
-/// (current word large + accent color, trailing phrase small + base color).
+/// The "previous phrase" line in cascade mode shrinks to this fraction of
+/// `font_size` — tuned by eye against the reference "big word" preset.
 const CASCADE_PREV_SCALE: f32 = 0.6;
+/// How much bigger than `font_size` the word currently being spoken pops to.
+const CASCADE_ACTIVE_SCALE: f32 = 1.15;
+/// Ramp speed (ms) for the per-word *size* pop only — kept short enough to
+/// read as a snap, not a slow grow. Color is a separate, effectively
+/// instant transition (see below): a highlight that visibly fades in is
+/// the thing that reads as "out of sync with the voice," even though the
+/// underlying word timestamp is correct — the size pop is just polish and
+/// doesn't carry that same sync expectation.
+const CASCADE_SCALE_POP_MS: i64 = 60;
 
-/// Renders one cascade-mode dialogue: the just-finished chunk (if any)
-/// small and in `text_color` on its own line, followed by the chunk
-/// currently being spoken large and in `accent_color`. `animation` still
-/// applies to the current line's per-word timing (karaoke/highlight/etc),
-/// layered under the accent-color override.
-fn build_cascade_text(prev: Option<&[WordTimestamp]>, current: &[WordTimestamp], style: &CaptionStyle) -> Result<String, String> {
+/// Per-intensity active-word pop scale. Empty/no-match prosody data
+/// means every word reads as `Medium`, which maps to the same value
+/// `CASCADE_ACTIVE_SCALE` always was — a burn with no prosody data
+/// behaves exactly as before.
+fn active_scale_for_intensity(intensity: WordIntensity) -> f32 {
+    match intensity {
+        WordIntensity::Low => 1.05,
+        WordIntensity::Medium => CASCADE_ACTIVE_SCALE,
+        WordIntensity::High => 1.35,
+    }
+}
+
+/// Renders one cascade-mode dialogue: the just-finished phrase (if any)
+/// shrinks to `text_color` on its own line, followed by the phrase
+/// currently being spoken — shown at full size in `text_color`, except the
+/// exact word being spoken *right now* pops to `accent_color` and
+/// slightly larger, then reverts once it's done. Color switches instantly
+/// at the word's own start/end (a 1ms `\t` window — libass has no true
+/// zero-duration transform); only the size pop eases. A moving per-word
+/// spotlight, not a whole-phrase color swap — `style.animation` is
+/// intentionally ignored here, since this per-word pop *is* the
+/// animation.
+fn build_cascade_text(
+    prev: Option<&[WordTimestamp]>,
+    current: &[WordTimestamp],
+    style: &CaptionStyle,
+    prosody: &[ProsodyWord],
+    speakers: &[SpeakerSegment],
+) -> Result<String, String> {
     let prev_color = hex_to_ass_override_color(&style.text_color)?;
     let accent_color = hex_to_ass_override_color(&style.accent_color)?;
+    // Precomputed once (fallible parsing needs `?`, which the per-word
+    // closure below can't use) — empty when there's no diarization data,
+    // so every word falls back to the style's own accent_color unchanged.
+    let speaker_colors: Vec<String> =
+        SPEAKER_COLORS.iter().map(|c| hex_to_ass_override_color(c)).collect::<Result<_, _>>()?;
     let prev_size = (style.font_size as f32 * CASCADE_PREV_SCALE).round().max(1.0) as u32;
+    let base_size = style.font_size;
 
     let mut out = String::new();
     if let Some(prev_words) = prev {
         if !prev_words.is_empty() {
             let prev_text: Vec<String> = prev_words.iter().map(|w| apply_text_transform(&w.word, &style.text_transform)).collect();
-            out.push_str(&format!(
-                "{{\\fs{prev_size}\\c{prev_color}}}{}\\N",
-                escape_ass_text(&prev_text.join(" "))
-            ));
+            out.push_str(&format!("{{\\fs{prev_size}\\c{prev_color}}}{}\\N", escape_ass_text(&prev_text.join(" "))));
         }
     }
-    out.push_str(&format!("{{\\fs{}\\c{accent_color}}}", style.font_size));
-    out.push_str(&build_animated_text(current, &style.animation, &style.text_transform));
+
+    let chunk_start = current.first().map(|w| w.start).unwrap_or(0.0);
+    let current_text: String = current
+        .iter()
+        .map(|w| {
+            let text = apply_text_transform(&w.word, &style.text_transform);
+            let start_ms = ((w.start - chunk_start) * 1000.0).round().max(0.0) as i64;
+            let end_ms = (((w.end - chunk_start) * 1000.0).round().max(0.0) as i64).max(start_ms + 1);
+            let active_scale = active_scale_for_intensity(prosody_intensity_at(prosody, w.start));
+            let active_size = (style.font_size as f32 * active_scale).round().max(1.0) as u32;
+            let word_accent_color = speaker_id_at(speakers, w.start)
+                .map(|id| speaker_colors[id as usize % speaker_colors.len()].as_str())
+                .unwrap_or(&accent_color);
+            format!(
+                "{{\\fs{base_size}\\c{prev_color}\\t({start_ms},{},\\c{word_accent_color})\\t({start_ms},{},\\fs{active_size})\\t({end_ms},{},\\c{prev_color})\\t({end_ms},{},\\fs{base_size})}}{} ",
+                start_ms + 1,
+                start_ms + CASCADE_SCALE_POP_MS,
+                end_ms + 1,
+                end_ms + CASCADE_SCALE_POP_MS,
+                escape_ass_text(&text)
+            )
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    out.push_str(&current_text);
     Ok(out)
 }
 
 pub(crate) fn build_ass_document(
     words: &[WordTimestamp],
     style: &CaptionStyle,
-    custom_overlays: &[CustomTextOverlay],
+    prosody: &[ProsodyWord],
+    speakers: &[SpeakerSegment],
 ) -> Result<String, String> {
     let mut doc = String::new();
     doc.push_str("[Script Info]\n");
     doc.push_str("ScriptType: v4.00+\n");
-    doc.push_str("PlayResX: 1920\n");
-    doc.push_str("PlayResY: 1080\n");
+    doc.push_str(&format!("PlayResX: {}\n", PLAY_RES_X as i64));
+    doc.push_str(&format!("PlayResY: {}\n", PLAY_RES_Y as i64));
     doc.push_str("WrapStyle: 0\n");
     doc.push_str("ScaledBorderAndShadow: yes\n\n");
 
@@ -395,29 +541,12 @@ pub(crate) fn build_ass_document(
         style.background_opacity,
         style.shadow_size,
     )?);
-    for (i, overlay) in custom_overlays.iter().enumerate() {
-        doc.push_str(&build_style_line(
-            &format!("Overlay{i}"),
-            &overlay.font_family,
-            overlay.font_size,
-            &overlay.text_color,
-            &overlay.outline_color,
-            &overlay.position,
-            overlay.bold,
-            overlay.italic,
-            overlay.letter_spacing,
-            &overlay.background,
-            &overlay.background_color,
-            overlay.background_opacity,
-            overlay.shadow_size,
-        )?);
-    }
     doc.push('\n');
 
     doc.push_str("[Events]\n");
     doc.push_str("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
 
-    let chunks = group_words_into_lines(words, style.words_per_line);
+    let chunks = group_words_into_phrases(words, style.words_per_line);
     for (i, chunk) in chunks.iter().enumerate() {
         let (Some(first), Some(last)) = (chunk.first(), chunk.last()) else {
             continue;
@@ -425,20 +554,12 @@ pub(crate) fn build_ass_document(
         let start = ass_timestamp(first.start);
         let end = ass_timestamp(last.end);
         let text = if style.style_mode == "cascade" {
-            let prev = if i > 0 { Some(chunks[i - 1]) } else { None };
-            build_cascade_text(prev, chunk, style)?
+            let prev = if i > 0 { Some(chunks[i - 1].as_slice()) } else { None };
+            build_cascade_text(prev, chunk, style, prosody, speakers)?
         } else {
-            build_animated_text(chunk, &style.animation, &style.text_transform)
+            build_animated_text(chunk, &style.animation, &style.text_transform, &style.position)
         };
         doc.push_str(&format!("Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"));
-    }
-
-    for (i, overlay) in custom_overlays.iter().enumerate() {
-        let start = ass_timestamp(overlay.start);
-        let end = ass_timestamp(overlay.end.max(overlay.start + 0.1));
-        let spans = synthesize_word_spans(&overlay.text, overlay.start, overlay.end);
-        let text = build_animated_text(&spans, &overlay.animation, &overlay.text_transform);
-        doc.push_str(&format!("Dialogue: 1,{start},{end},Overlay{i},,0,0,0,,{text}\n"));
     }
 
     Ok(doc)
@@ -479,29 +600,6 @@ mod tests {
             shadow_size: 0.0,
             style_mode: "classic".to_string(),
             accent_color: "#FFE600".to_string(),
-        }
-    }
-
-    fn overlay(text: &str, start: f64, end: f64) -> CustomTextOverlay {
-        CustomTextOverlay {
-            id: "1".to_string(),
-            text: text.to_string(),
-            start,
-            end,
-            position: "top".to_string(),
-            font_family: "Impact".to_string(),
-            font_size: 80,
-            text_color: "#FFFF00".to_string(),
-            outline_color: "#000000".to_string(),
-            animation: "none".to_string(),
-            bold: false,
-            italic: false,
-            letter_spacing: 0.0,
-            text_transform: "none".to_string(),
-            background: "none".to_string(),
-            background_color: "#000000".to_string(),
-            background_opacity: 70.0,
-            shadow_size: 0.0,
         }
     }
 
@@ -553,7 +651,7 @@ mod tests {
     #[test]
     fn build_animated_text_karaoke_includes_k_tags_for_every_word() {
         let words = vec![word("hello", 0.0, 0.5), word("world", 0.5, 1.2)];
-        let text = build_animated_text(&words, "karaoke", "none");
+        let text = build_animated_text(&words, "karaoke", "none", "bottom");
         assert!(text.contains("{\\k50}hello"));
         assert!(text.contains("{\\k70}world"));
     }
@@ -561,19 +659,19 @@ mod tests {
     #[test]
     fn build_animated_text_none_is_plain_joined_words() {
         let words = vec![word("hello", 0.0, 0.5), word("world", 0.5, 1.2)];
-        assert_eq!(build_animated_text(&words, "none", "none"), "hello world");
+        assert_eq!(build_animated_text(&words, "none", "none", "bottom"), "hello world");
     }
 
     #[test]
     fn build_animated_text_applies_transform_before_animating() {
         let words = vec![word("hello", 0.0, 0.5)];
-        assert_eq!(build_animated_text(&words, "none", "uppercase"), "HELLO");
+        assert_eq!(build_animated_text(&words, "none", "uppercase", "bottom"), "HELLO");
     }
 
     #[test]
     fn build_animated_text_highlight_transitions_each_word_at_its_own_offset() {
         let words = vec![word("hello", 0.0, 0.5), word("world", 0.5, 1.2)];
-        let text = build_animated_text(&words, "highlight", "none");
+        let text = build_animated_text(&words, "highlight", "none", "bottom");
         assert!(text.contains("\\t(0,150,\\c)}hello"));
         assert!(text.contains("\\t(500,650,\\c)}world")); // "world" starts 500ms into the chunk
     }
@@ -581,20 +679,30 @@ mod tests {
     #[test]
     fn build_animated_text_typewriter_reveals_each_character() {
         let words = vec![word("hi", 0.0, 0.5)];
-        let text = build_animated_text(&words, "typewriter", "none");
+        let text = build_animated_text(&words, "typewriter", "none", "bottom");
         assert!(text.contains("\\alpha&HFF&"));
         assert!(text.contains('h'));
         assert!(text.contains('i'));
     }
 
     #[test]
-    fn synthesize_word_spans_distributes_time_evenly() {
-        let spans = synthesize_word_spans("one two three four", 10.0, 14.0);
-        assert_eq!(spans.len(), 4);
-        assert_eq!(spans[0].start, 10.0);
-        assert_eq!(spans[0].end, 11.0);
-        assert_eq!(spans[3].start, 13.0);
-        assert_eq!(spans[3].end, 14.0);
+    fn build_animated_text_slide_moves_toward_the_resting_position() {
+        let words = vec![word("hi", 0.0, 0.5)];
+        let bottom = build_animated_text(&words, "slide", "none", "bottom");
+        // Bottom: PlayResX/2=960, resting y = 1080-60=1020, slides up from 1020+60=1080.
+        assert!(bottom.contains("\\move(960,1080,960,1020)"));
+
+        let top = build_animated_text(&words, "slide", "none", "top");
+        // Top: resting y = margin_v(60), slides down from 60-60=0.
+        assert!(top.contains("\\move(960,0,960,60)"));
+    }
+
+    #[test]
+    fn build_animated_text_zoom_starts_oversized_and_settles_to_full_size() {
+        let words = vec![word("hi", 0.0, 0.5)];
+        let text = build_animated_text(&words, "zoom", "none", "bottom");
+        assert!(text.contains("\\fscx160\\fscy160"));
+        assert!(text.contains("\\t(0,180,\\fscx100\\fscy100"));
     }
 
     #[test]
@@ -615,6 +723,46 @@ mod tests {
     }
 
     #[test]
+    fn merge_punctuation_attaches_sentence_end_to_preceding_word() {
+        let words = vec![word("hi", 0.0, 0.5), word(".", 0.5, 0.5), word("bye", 0.6, 1.0)];
+        let merged = merge_punctuation(&words);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].0.word, "hi.");
+        assert_eq!(merged[0].0.end, 0.5); // extended to cover the punctuation token
+        assert_eq!(merged[0].1, PhraseBreak::Sentence);
+        assert_eq!(merged[1].0.word, "bye");
+        assert_eq!(merged[1].1, PhraseBreak::None);
+    }
+
+    #[test]
+    fn merge_punctuation_classifies_clause_vs_sentence() {
+        let words = vec![word("a", 0.0, 0.1), word(",", 0.1, 0.1), word("b", 0.2, 0.3), word("!", 0.3, 0.3)];
+        let merged = merge_punctuation(&words);
+        assert_eq!(merged[0].1, PhraseBreak::Clause);
+        assert_eq!(merged[1].1, PhraseBreak::Sentence);
+    }
+
+    #[test]
+    fn group_words_into_phrases_breaks_at_sentence_end_before_hitting_the_cap() {
+        // "hi." ends a sentence after just 1 word — should not wait for max_words=4.
+        let words = vec![word("hi", 0.0, 0.5), word(".", 0.5, 0.5), word("bye", 0.6, 1.0), word("there", 1.0, 1.4)];
+        let chunks = group_words_into_phrases(&words, 4);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 1);
+        assert_eq!(chunks[0][0].word, "hi.");
+        assert_eq!(chunks[1].len(), 2);
+    }
+
+    #[test]
+    fn group_words_into_phrases_falls_back_to_max_words_cap_when_no_punctuation() {
+        let words = vec![word("a", 0.0, 0.1), word("b", 0.1, 0.2), word("c", 0.2, 0.3), word("d", 0.3, 0.4), word("e", 0.4, 0.5)];
+        let chunks = group_words_into_phrases(&words, 4);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 4);
+        assert_eq!(chunks[1].len(), 1);
+    }
+
+    #[test]
     fn build_ass_document_emits_one_dialogue_line_per_chunk() {
         let words = vec![
             word("one", 0.0, 0.2),
@@ -625,7 +773,7 @@ mod tests {
         ];
         let mut s = style("none");
         s.words_per_line = 4;
-        let doc = build_ass_document(&words, &s, &[]).unwrap();
+        let doc = build_ass_document(&words, &s, &[], &[]).unwrap();
         let dialogue_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Dialogue:")).collect();
         assert_eq!(dialogue_lines.len(), 2); // 4 words + 1 word = 2 chunks
         assert!(dialogue_lines[0].contains("one two three four"));
@@ -636,30 +784,51 @@ mod tests {
     fn build_cascade_text_omits_prev_line_when_none() {
         let current = vec![word("sometimes", 0.0, 0.5)];
         let s = style("none");
-        let text = build_cascade_text(None, &current, &s).unwrap();
+        let text = build_cascade_text(None, &current, &s, &[], &[]).unwrap();
         assert!(!text.contains("\\N"));
         assert!(text.contains(&format!("\\fs{}", s.font_size)));
         assert!(text.contains("sometimes"));
     }
 
     #[test]
-    fn build_cascade_text_renders_prev_small_and_current_accent_colored() {
+    fn build_cascade_text_renders_prev_small_and_pops_the_active_word() {
         let prev = vec![word("at", 0.0, 0.2), word("night", 0.2, 0.4)];
         let current = vec![word("sometimes", 0.4, 0.9)];
         let mut s = style("none");
         s.font_size = 64;
         s.text_color = "#FFFFFF".to_string();
         s.accent_color = "#FFE600".to_string();
-        let text = build_cascade_text(Some(&prev), &current, &s).unwrap();
+        let text = build_cascade_text(Some(&prev), &current, &s, &[], &[]).unwrap();
 
         // Prev line: smaller font, base text color, ends with a line break.
         assert!(text.contains(&format!("\\fs{}", (64.0_f32 * CASCADE_PREV_SCALE).round() as u32)));
-        assert!(text.contains("&HFFFFFF&")); // white override color for prev
         assert!(text.contains("at night\\N"));
-        // Current line: full font size, accent color.
-        assert!(text.contains("\\fs64"));
-        assert!(text.contains("&H00E6FF&")); // BGR override for #FFE600
+
+        // The current word starts at base size/color, pops to a bigger
+        // accent-colored size while it's being spoken, then reverts — it's
+        // never statically colored for the whole phrase. Color switches
+        // instantly (1ms window) right at the word's own start/end, so the
+        // highlight never visibly lags the spoken word; only the size pop
+        // eases.
+        let active_size = (64.0_f32 * CASCADE_ACTIVE_SCALE).round() as u32;
+        assert!(text.contains("\\fs64\\c&HFFFFFF&\\t(0,1,\\c&H00E6FF&)"));
+        assert!(text.contains(&format!("\\t(0,{CASCADE_SCALE_POP_MS},\\fs{active_size})")));
+        assert!(text.contains("\\t(500,501,\\c&HFFFFFF&)"));
+        assert!(text.contains(&format!("\\t(500,{},\\fs64)", 500 + CASCADE_SCALE_POP_MS)));
         assert!(text.contains("sometimes"));
+    }
+
+    #[test]
+    fn build_cascade_text_pops_each_word_independently() {
+        let current = vec![word("couple", 0.0, 0.3), word("reasons", 0.3, 0.8)];
+        let s = style("none");
+        let text = build_cascade_text(None, &current, &s, &[], &[]).unwrap();
+        // Each word gets its own [start,end] instant-color window — not
+        // one shared color block for the whole phrase.
+        assert!(text.contains("\\t(0,1,"));
+        assert!(text.contains("\\t(300,301,"));
+        assert!(text.contains("couple"));
+        assert!(text.contains("reasons"));
     }
 
     #[test]
@@ -672,7 +841,7 @@ mod tests {
         let mut s = style("none");
         s.style_mode = "cascade".to_string();
         s.words_per_line = 2;
-        let doc = build_ass_document(&words, &s, &[]).unwrap();
+        let doc = build_ass_document(&words, &s, &[], &[]).unwrap();
         let dialogue_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Dialogue:")).collect();
         assert_eq!(dialogue_lines.len(), 2);
         assert!(!dialogue_lines[0].contains("\\N")); // first chunk: no previous line yet
@@ -684,35 +853,7 @@ mod tests {
     fn build_ass_document_rejects_invalid_color() {
         let mut s = style("none");
         s.text_color = "bogus".to_string();
-        assert!(build_ass_document(&[word("hi", 0.0, 0.1)], &s, &[]).is_err());
-    }
-
-    #[test]
-    fn build_ass_document_includes_custom_overlays_on_a_higher_layer_with_their_own_style() {
-        let words = vec![word("hello", 0.0, 1.0)];
-        let overlays = vec![overlay("SALE!", 0.5, 2.0)];
-        let doc = build_ass_document(&words, &style("none"), &overlays).unwrap();
-
-        let style_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Style:")).collect();
-        assert_eq!(style_lines.len(), 2);
-        assert!(style_lines[0].starts_with("Style: Default,"));
-        assert!(style_lines[1].starts_with("Style: Overlay0,"));
-
-        let dialogue_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Dialogue:")).collect();
-        assert_eq!(dialogue_lines.len(), 2);
-        assert!(dialogue_lines[0].starts_with("Dialogue: 0,")); // transcript caption, layer 0
-        assert!(dialogue_lines[1].starts_with("Dialogue: 1,")); // overlay, layer 1 (draws on top)
-        assert!(dialogue_lines[1].contains(",Overlay0,"));
-        assert!(dialogue_lines[1].contains("SALE!"));
-    }
-
-    #[test]
-    fn build_ass_document_works_with_only_custom_overlays_no_transcript() {
-        let overlays = vec![overlay("Link in bio", 0.0, 2.0)];
-        let doc = build_ass_document(&[], &style("none"), &overlays).unwrap();
-        let dialogue_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Dialogue:")).collect();
-        assert_eq!(dialogue_lines.len(), 1);
-        assert!(dialogue_lines[0].contains("Link in bio"));
+        assert!(build_ass_document(&[word("hi", 0.0, 0.1)], &s, &[], &[]).is_err());
     }
 }
 
@@ -722,14 +863,22 @@ pub async fn burn_captions(
     video_path: String,
     words: Vec<WordTimestamp>,
     style: CaptionStyle,
-    custom_overlays: Vec<CustomTextOverlay>,
     output_path: String,
+    prosody: Vec<ProsodyWord>,
+    speakers: Vec<SpeakerSegment>,
+    voiceover_path: Option<String>,
+    voiceover_offset_seconds: Option<f64>,
 ) -> Result<String, String> {
-    if words.is_empty() && custom_overlays.is_empty() {
-        return Err(
-            "Nothing to burn — run the transcription pipeline or add custom text first.".to_string()
-        );
+    if words.is_empty() {
+        return Err("Nothing to burn — run the transcription pipeline first.".to_string());
     }
+
+    // Disk-persisted check (not just frontend state) — holds even if this
+    // call comes from a different session/process than the one that
+    // transcribed video_path. See record_fresh_transcript's doc comment.
+    // Still valid with a voiceover active: this checks video_path's own
+    // on-disk fingerprint, not which words are being burned.
+    verify_transcript_is_fresh(&app, &video_path)?;
 
     let duration = probe_duration_seconds(&video_path).await;
     let segment_count = duration.map(recommended_segment_count).unwrap_or(1);
@@ -740,18 +889,22 @@ pub async fn burn_captions(
     // lossless concat.) Otherwise fall through to the simple single-pass
     // path below, which is both the common case (typical reels are short)
     // and the tested fallback if a duration probe or segmentation ever
-    // misbehaves.
-    if segment_count > 1 {
+    // misbehaves. A voiceover forces the single-pass path regardless of
+    // length — segments.rs slices the *original* audio per segment, with
+    // no notion of a separate voiceover file/offset to slice in lockstep;
+    // correctness matters more here than the parallel-encode speedup.
+    if segment_count > 1 && voiceover_path.is_none() {
         if let Some(duration) = duration {
             let result = burn_captions_segmented(
                 &app,
                 &video_path,
                 &words,
                 &style,
-                &custom_overlays,
                 &output_path,
                 duration,
                 segment_count,
+                &prosody,
+                &speakers,
             )
             .await;
             return result.map(|_| output_path);
@@ -759,13 +912,30 @@ pub async fn burn_captions(
     }
 
     let ass_path = unique_temp_path("captions", "ass");
-    let ass_contents = build_ass_document(&words, &style, &custom_overlays)?;
+    let ass_contents = build_ass_document(&words, &style, &prosody, &speakers)?;
     std::fs::write(&ass_path, ass_contents).map_err(|e| format!("Failed to write subtitle file: {e}"))?;
 
-    let filter = format!("ass='{}'", escape_ffmpeg_filter_path(&ass_path));
+    let filter = format!(
+        "ass='{}':fontsdir='{}'",
+        escape_ffmpeg_filter_path(&ass_path),
+        escape_ffmpeg_filter_path(crate::bin_paths::fonts_dir())
+    );
     let encoder = best_encoder().await;
 
-    let mut args = vec!["-y".to_string(), "-i".to_string(), video_path, "-vf".to_string(), filter];
+    let mut args = vec!["-y".to_string(), "-i".to_string(), video_path];
+    // A voiceover replaces the video's own audio track entirely — same
+    // `-itsoffset` timing convention as vosync.rs's mux (positive =
+    // voiceover starts later), applied to a second input rather than
+    // `-c:a copy`-ing the first input's own audio.
+    let has_voiceover = voiceover_path.is_some();
+    if let Some(vo_path) = voiceover_path {
+        args.push("-itsoffset".to_string());
+        args.push(voiceover_offset_seconds.unwrap_or(0.0).to_string());
+        args.push("-i".to_string());
+        args.push(vo_path);
+    }
+    args.push("-vf".to_string());
+    args.push(filter);
     // Burning text onto a video needs decode + re-encode no matter what
     // (filters can't stream-copy). Prefer a hardware encoder when this
     // machine's ffmpeg build has one (usually 5-10x faster than even the
@@ -774,8 +944,18 @@ pub async fn burn_captions(
     args.extend(encoder.speed_args(0)); // 0 threads = let libx264 auto-detect; no oversubscription risk for a single job
     args.push("-c:v".to_string());
     args.push(encoder.codec_name().to_string());
-    args.push("-c:a".to_string());
-    args.push("copy".to_string());
+    if has_voiceover {
+        args.push("-map".to_string());
+        args.push("0:v".to_string());
+        args.push("-map".to_string());
+        args.push("1:a".to_string());
+        args.push("-c:a".to_string());
+        args.push("aac".to_string());
+        args.push("-shortest".to_string());
+    } else {
+        args.push("-c:a".to_string());
+        args.push("copy".to_string());
+    }
     args.push(output_path.clone());
 
     let result = run_with_progress(&app, "burn-progress", "burning", args, duration).await;
@@ -784,4 +964,32 @@ pub async fn burn_captions(
     result?;
 
     Ok(output_path)
+}
+
+/// Extracts audio, runs `media_ai/prosody.py` (per-word RMS-energy
+/// percentile bucketing), returns the result for the caller to hold onto
+/// and pass into `burn_captions`.
+#[tauri::command]
+pub async fn analyze_prosody(app: AppHandle, video_path: String, words: Vec<WordTimestamp>) -> Result<Vec<ProsodyWord>, String> {
+    let audio_path = crate::pipeline::extract_audio(&app, &video_path).await?;
+
+    let words_json_path = unique_temp_path("prosody-words", "json");
+    let words_json =
+        serde_json::to_string(&words).map_err(|e| format!("Couldn't serialize words for prosody analysis: {e}"))?;
+    std::fs::write(&words_json_path, words_json).map_err(|e| format!("Couldn't write prosody words file: {e}"))?;
+
+    let stdout = crate::media_ai::run_media_ai_script(
+        &app,
+        "prosody.py",
+        vec!["--audio".to_string(), cli_path(&audio_path), "--words".to_string(), cli_path(&words_json_path)],
+        "prosody-progress",
+        "analyzing_prosody",
+    )
+    .await;
+
+    let _ = std::fs::remove_file(&audio_path);
+    let _ = std::fs::remove_file(&words_json_path);
+    let stdout = stdout?;
+
+    serde_json::from_str(&stdout).map_err(|e| format!("Couldn't parse prosody.py output: {e} (raw: {stdout})"))
 }

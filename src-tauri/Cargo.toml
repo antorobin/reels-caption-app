@@ -23,22 +23,27 @@ crate-type = ["rlib"]
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
 
+[target.'cfg(windows)'.dependencies]
+# Ensures ffmpeg/stt/media-ai/llama-server child processes die with the app instead
+# of becoming orphaned zombies — see proc_cleanup.rs. A Windows Job Object
+# with KILL_ON_JOB_CLOSE, assigned to this process itself; by default (no
+# breakaway flags set) every process this app spawns at any depth
+# automatically inherits job membership too, so this needs no changes at
+# any individual subprocess call site.
+win32job = "2"
+
 [dependencies]
 tauri = { version = "2.0.0", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2.0.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# Async subprocess handling for ffmpeg/whisper-cli, so long-running jobs
+# Async subprocess handling for ffmpeg/stt engines, so long-running jobs
 # don't block the webview's UI thread. Tauri already runs its own tokio
 # runtime under the hood; this just lets our commands hook into it.
-tokio = { version = "1", features = ["process", "io-util"] }
-
-# NOT YET ADDED: `whisper-rs` (see README "Suggested next build steps" #1).
-# It compiles whisper.cpp from C/C++ source via `cmake` in its build script,
-# so pulling it in requires a working cmake + C/C++ toolchain to even test
-# a `cargo check`. `check_whisper`/the pipeline below still shell out to the
-# `whisper-cli` binary (README section 2) — swap that subprocess call for
-# `whisper-rs` when you're ready to unify desktop + mobile.
+tokio = { version = "1", features = ["process", "io-util", "sync"] }
+# Talks to the bundled llama-server.exe's local HTTP completion API (see
+# llm.rs) -- plain http:// to 127.0.0.1 only, so TLS backends are disabled.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [features]
 # this feature is used for production builds where `devPath` points to the filesystem

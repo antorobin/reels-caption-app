@@ -34,7 +34,8 @@ use std::sync::{Arc, Mutex};
 use tauri::AppHandle;
 use tokio::process::Command;
 
-use crate::captions::{build_ass_document, escape_ffmpeg_filter_path, CaptionStyle, CustomTextOverlay};
+use crate::captions::{build_ass_document, escape_ffmpeg_filter_path, CaptionStyle, ProsodyWord};
+use crate::diarize::SpeakerSegment;
 use crate::ffmpeg::{best_encoder, run_capturing_progress, Encoder};
 use crate::pipeline::WordTimestamp;
 use crate::util::{cli_path, emit_progress, unique_temp_path};
@@ -51,13 +52,6 @@ pub struct Segment {
     /// input-side `-ss` seek (the first frame of a seeked segment gets
     /// PTS ~0, not its original absolute timestamp).
     pub words: Vec<WordTimestamp>,
-    /// Custom overlays intersecting this segment's time range, clipped to
-    /// it and shifted the same way as `words`. Unlike transcript captions,
-    /// clipping a static overlay at a segment boundary is visually
-    /// seamless (same text, same style, continuing across the cut) — so
-    /// unlike `snap_to_gap`, cut points don't need to dodge overlay
-    /// windows too.
-    pub overlays: Vec<CustomTextOverlay>,
 }
 
 /// How many parallel segments to split into. Caps out at `MAX_SEGMENTS`
@@ -99,33 +93,12 @@ fn snap_to_gap(ideal: f64, words: &[WordTimestamp], duration: f64) -> f64 {
     }
 }
 
-/// Clips `overlay` to `[seg_start, seg_end)` and shifts it to be relative
-/// to `seg_start`. Returns `None` if the overlay doesn't intersect this
-/// segment at all.
-fn clip_overlay_to_segment(overlay: &CustomTextOverlay, seg_start: f64, seg_end: f64) -> Option<CustomTextOverlay> {
-    let clipped_start = overlay.start.max(seg_start);
-    let clipped_end = overlay.end.min(seg_end);
-    if clipped_end <= clipped_start {
-        return None;
-    }
-    Some(CustomTextOverlay {
-        start: clipped_start - seg_start,
-        end: clipped_end - seg_start,
-        ..overlay.clone()
-    })
-}
-
-/// Pure planning function: given the whole video's duration, word
-/// timestamps, and custom text overlays, decides where to cut and
-/// slices/shifts both for each resulting segment.
-pub fn plan_segments(
-    duration: f64,
-    words: &[WordTimestamp],
-    overlays: &[CustomTextOverlay],
-    target_count: usize,
-) -> Vec<Segment> {
+/// Pure planning function: given the whole video's duration and word
+/// timestamps, decides where to cut and slices/shifts them for each
+/// resulting segment.
+pub fn plan_segments(duration: f64, words: &[WordTimestamp], target_count: usize) -> Vec<Segment> {
     if target_count <= 1 || duration <= 0.0 {
-        return vec![Segment { start: 0.0, end: duration.max(0.0), words: words.to_vec(), overlays: overlays.to_vec() }];
+        return vec![Segment { start: 0.0, end: duration.max(0.0), words: words.to_vec() }];
     }
 
     let mut cut_points: Vec<f64> = (1..target_count)
@@ -152,9 +125,31 @@ pub fn plan_segments(
                     end: (word.end - start).min(end - start).max(0.0),
                 })
                 .collect();
-            let segment_overlays =
-                overlays.iter().filter_map(|overlay| clip_overlay_to_segment(overlay, start, end)).collect();
-            Segment { start, end, words: segment_words, overlays: segment_overlays }
+            Segment { start, end, words: segment_words }
+        })
+        .collect()
+}
+
+/// Shifts prosody words from whole-video-absolute time into a segment's
+/// own local time frame (mirrors how `plan_segments` shifts word
+/// timestamps), keeping only the ones that actually fall in range.
+fn shift_prosody(prosody: &[ProsodyWord], start: f64, end: f64) -> Vec<ProsodyWord> {
+    prosody
+        .iter()
+        .filter(|p| p.start >= start && p.start < end)
+        .map(|p| ProsodyWord { start: p.start - start, end: (p.end - start).min(end - start), intensity: p.intensity })
+        .collect()
+}
+
+/// Same idea as `shift_prosody`, for diarization speaker segments.
+fn shift_speakers(speakers: &[SpeakerSegment], start: f64, end: f64) -> Vec<SpeakerSegment> {
+    speakers
+        .iter()
+        .filter(|s| s.start < end && s.end > start)
+        .map(|s| SpeakerSegment {
+            start: (s.start - start).max(0.0),
+            end: (s.end - start).min(end - start),
+            speaker_id: s.speaker_id,
         })
         .collect()
 }
@@ -166,14 +161,26 @@ struct SegmentJob {
     style: CaptionStyle,
     encoder: Encoder,
     threads: usize,
+    /// Whole-video-absolute-time prosody words — shifted to this
+    /// segment's own local time frame (matching `segment.words`) right
+    /// before rendering.
+    prosody: Vec<ProsodyWord>,
+    /// Same idea, for diarization speaker segments.
+    speakers: Vec<SpeakerSegment>,
 }
 
 async fn burn_one_segment(job: SegmentJob, on_seconds: impl Fn(f64) + Send + 'static) -> Result<PathBuf, String> {
     let ass_path = unique_temp_path(&format!("segment-{}-captions", job.index), "ass");
-    let ass_contents = build_ass_document(&job.segment.words, &job.style, &job.segment.overlays)?;
+    let local_prosody = shift_prosody(&job.prosody, job.segment.start, job.segment.end);
+    let local_speakers = shift_speakers(&job.speakers, job.segment.start, job.segment.end);
+    let ass_contents = build_ass_document(&job.segment.words, &job.style, &local_prosody, &local_speakers)?;
     std::fs::write(&ass_path, ass_contents).map_err(|e| format!("Failed to write subtitle file: {e}"))?;
 
-    let filter = format!("ass='{}'", escape_ffmpeg_filter_path(&ass_path));
+    let filter = format!(
+        "ass='{}':fontsdir='{}'",
+        escape_ffmpeg_filter_path(&ass_path),
+        escape_ffmpeg_filter_path(crate::bin_paths::fonts_dir())
+    );
     let output_path = unique_temp_path(&format!("segment-{}", job.index), "mp4");
     let output_path_arg = cli_path(&output_path);
 
@@ -233,7 +240,7 @@ async fn concat_segments(segment_paths: &[PathBuf], output_path: &str) -> Result
     std::fs::write(&list_path, list_contents).map_err(|e| format!("Failed to write concat list: {e}"))?;
     let list_path_arg = cli_path(&list_path);
 
-    let output = Command::new("ffmpeg")
+    let output = Command::new(crate::bin_paths::ffmpeg_path())
         .args(["-y", "-f", "concat", "-safe", "0", "-i", &list_path_arg, "-c", "copy", output_path])
         .output()
         .await
@@ -257,16 +264,17 @@ pub async fn burn_captions_segmented(
     video_path: &str,
     words: &[WordTimestamp],
     style: &CaptionStyle,
-    custom_overlays: &[CustomTextOverlay],
     output_path: &str,
     duration: f64,
     segment_count: usize,
+    prosody: &[ProsodyWord],
+    speakers: &[SpeakerSegment],
 ) -> Result<(), String> {
     let encoder = best_encoder().await;
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let threads_per_segment = (cores / segment_count).max(1);
 
-    let segments = plan_segments(duration, words, custom_overlays, segment_count);
+    let segments = plan_segments(duration, words, segment_count);
     let segment_durations: Vec<f64> = segments.iter().map(|s| (s.end - s.start).max(0.01)).collect();
     let total_duration: f64 = segment_durations.iter().sum();
     let segment_progress: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(vec![0.0; segments.len()]));
@@ -291,6 +299,8 @@ pub async fn burn_captions_segmented(
         let progress = Arc::clone(&segment_progress);
         let seg_duration = segment_durations[index];
         let total = total_duration;
+        let prosody = prosody.to_vec();
+        let speakers = speakers.to_vec();
 
         handles.push(tokio::spawn(async move {
             let on_seconds = move |secs: f64| {
@@ -308,7 +318,7 @@ pub async fn burn_captions_segmented(
             };
 
             burn_one_segment(
-                SegmentJob { index, video_path, segment, style, encoder, threads: threads_per_segment },
+                SegmentJob { index, video_path, segment, style, encoder, threads: threads_per_segment, prosody, speakers },
                 on_seconds,
             )
             .await
@@ -361,29 +371,6 @@ mod tests {
         WordTimestamp { word: w.to_string(), start, end }
     }
 
-    fn overlay(text: &str, start: f64, end: f64) -> CustomTextOverlay {
-        CustomTextOverlay {
-            id: text.to_string(),
-            text: text.to_string(),
-            start,
-            end,
-            position: "top".to_string(),
-            font_family: "Impact".to_string(),
-            font_size: 80,
-            text_color: "#FFFF00".to_string(),
-            outline_color: "#000000".to_string(),
-            animation: "none".to_string(),
-            bold: false,
-            italic: false,
-            letter_spacing: 0.0,
-            text_transform: "none".to_string(),
-            background: "none".to_string(),
-            background_color: "#000000".to_string(),
-            background_opacity: 70.0,
-            shadow_size: 0.0,
-        }
-    }
-
     #[test]
     fn recommended_segment_count_skips_short_videos() {
         assert_eq!(recommended_segment_count(10.0), 1);
@@ -400,7 +387,7 @@ mod tests {
     #[test]
     fn plan_segments_returns_single_segment_for_target_count_one() {
         let words = vec![word("hi", 0.0, 1.0)];
-        let segments = plan_segments(100.0, &words, &[], 1);
+        let segments = plan_segments(100.0, &words, 1);
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].start, 0.0);
         assert_eq!(segments[0].end, 100.0);
@@ -412,7 +399,7 @@ mod tests {
         // midpoint of a 100s video split in two. The cut must land inside
         // that gap, not in the middle of either caption.
         let words = vec![word("before", 40.0, 48.0), word("after", 52.0, 60.0)];
-        let segments = plan_segments(100.0, &words, &[], 2);
+        let segments = plan_segments(100.0, &words, 2);
         assert_eq!(segments.len(), 2);
         let cut = segments[0].end;
         assert!(cut > 48.0 && cut < 52.0, "cut point {cut} should land in the 48-52s gap");
@@ -432,7 +419,7 @@ mod tests {
         // ideal when no close-enough gap exists" — here duration is small
         // enough (100s) that snap_to_gap's 5s tolerance won't reach a
         // distant gap, which is the correct, conservative behavior.
-        let segments = plan_segments(100.0, &words, &[], 2);
+        let segments = plan_segments(100.0, &words, 2);
         // Whatever the cut point is, no single word should be split
         // between two segments (each word appears whole in exactly one
         // segment's word list, by construction of plan_segments' filter).
@@ -443,7 +430,7 @@ mod tests {
     #[test]
     fn plan_segments_shifts_word_timestamps_relative_to_segment_start() {
         let words = vec![word("early", 2.0, 4.0), word("late", 60.0, 62.0)];
-        let segments = plan_segments(100.0, &words, &[], 2);
+        let segments = plan_segments(100.0, &words, 2);
         // Whichever segment "late" landed in, its shifted start must be
         // relative to that segment's own start, not the original video.
         let late_segment = segments.iter().find(|s| s.words.iter().any(|w| w.word == "late")).unwrap();
@@ -451,39 +438,4 @@ mod tests {
         assert_eq!(late_word.start, 60.0 - late_segment.start);
     }
 
-    #[test]
-    fn plan_segments_clips_overlay_wholly_within_one_segment() {
-        let overlays = vec![overlay("SALE!", 5.0, 8.0)];
-        let segments = plan_segments(100.0, &[], &overlays, 2);
-        let with_overlay: Vec<_> = segments.iter().filter(|s| !s.overlays.is_empty()).collect();
-        assert_eq!(with_overlay.len(), 1);
-        assert_eq!(with_overlay[0].overlays[0].start, 5.0);
-        assert_eq!(with_overlay[0].overlays[0].end, 8.0);
-    }
-
-    #[test]
-    fn plan_segments_splits_overlay_that_spans_a_cut_into_both_segments() {
-        // No transcript to snap a cut away from, so the ideal 50s midpoint
-        // is used exactly. An overlay from 45s-55s straddles it.
-        let overlays = vec![overlay("Follow us", 45.0, 55.0)];
-        let segments = plan_segments(100.0, &[], &overlays, 2);
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].end, 50.0);
-
-        let first = &segments[0].overlays[0];
-        assert_eq!(first.start, 45.0); // unshifted: segment starts at 0
-        assert_eq!(first.end, 50.0); // clipped to the segment boundary
-
-        let second = &segments[1].overlays[0];
-        assert_eq!(second.start, 0.0); // clipped + shifted: segment starts at 50
-        assert_eq!(second.end, 5.0); // 55 - 50
-    }
-
-    #[test]
-    fn plan_segments_drops_overlay_that_does_not_intersect_a_segment() {
-        let overlays = vec![overlay("Intro only", 0.0, 3.0)];
-        let segments = plan_segments(100.0, &[], &overlays, 2);
-        assert!(!segments[0].overlays.is_empty());
-        assert!(segments[1].overlays.is_empty());
-    }
 }

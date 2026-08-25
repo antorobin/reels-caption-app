@@ -1,61 +1,26 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import CaptionStyleEditor, { defaultCaptionStyle } from "./components/CaptionStyleEditor.jsx";
-import CustomTextOverlayEditor from "./components/CustomTextOverlayEditor.jsx";
-import ProgressBar, { formatElapsed } from "./components/ProgressBar.jsx";
-import SilenceRemovalPanel from "./components/SilenceRemovalPanel.jsx";
-import TranscriptEditor from "./components/TranscriptEditor.jsx";
-import VideoPreview from "./components/VideoPreview.jsx";
-import { estimateReadingDurationSeconds } from "./lib/reading-time.js";
+import AuthScreen from "./components/auth/AuthScreen.jsx";
+import { defaultCaptionStyle } from "./components/CaptionStyleEditor.jsx";
+import { formatElapsed } from "./components/ProgressBar.jsx";
+import AppShell from "./components/shell/AppShell.jsx";
+import { useAuth } from "./context/AuthContext.jsx";
 
 const VIDEO_FILTERS = [{ name: "Video", extensions: ["mp4", "mov", "mkv", "avi", "webm"] }];
 
-function newOverlayId() {
-  return typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `overlay-${Date.now()}-${Math.random()}`;
-}
-
-function defaultDraftOverlay() {
-  return {
-    text: "",
-    duration_secs: estimateReadingDurationSeconds(""),
-    duration_touched: false,
-    position: "top",
-    font_family: "Impact",
-    font_size: 72,
-    text_color: "#FFFF00",
-    outline_color: "#000000",
-    animation: "pop",
-    bold: true,
-    italic: false,
-    letter_spacing: 0,
-    text_transform: "none",
-    background: "none",
-    background_color: "#000000",
-    background_opacity: 70,
-    shadow_size: 0,
-  };
-}
-
 function App() {
-  const [greeting, setGreeting] = useState("");
-  const [ffmpegVersion, setFfmpegVersion] = useState("");
-  const [whisperStatus, setWhisperStatus] = useState("");
-  const [checking, setChecking] = useState(false);
-
   const [videoPath, setVideoPath] = useState("");
   const videoRef = useRef(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
-  const [customOverlays, setCustomOverlays] = useState([]);
-  const [draftOverlay, setDraftOverlay] = useState(defaultDraftOverlay());
-
   const [words, setWords] = useState([]);
   const [pipelineStatus, setPipelineStatus] = useState("");
   const [pipelineRunning, setPipelineRunning] = useState(false);
   const [pipelineProgress, setPipelineProgress] = useState(null);
+  const [detectedLanguage, setDetectedLanguage] = useState(null);
 
   const [captionStyle, setCaptionStyle] = useState(defaultCaptionStyle());
 
@@ -63,32 +28,35 @@ function App() {
   const [burning, setBurning] = useState(false);
   const [burnProgress, setBurnProgress] = useState(null);
 
-  async function sayHello() {
-    const result = await invoke("greet", { name: "Reels Creator" });
-    setGreeting(result);
-  }
+  const [prosody, setProsody] = useState([]);
+  const [analyzingProsody, setAnalyzingProsody] = useState(false);
+  const [prosodyStatus, setProsodyStatus] = useState("");
+  const [prosodyProgress, setProsodyProgress] = useState(null);
 
-  async function checkFfmpeg() {
-    setChecking(true);
-    try {
-      setFfmpegVersion(await invoke("check_ffmpeg"));
-    } catch (err) {
-      setFfmpegVersion(`Error: ${err}`);
-    } finally {
-      setChecking(false);
-    }
-  }
+  const [speakers, setSpeakers] = useState([]);
+  const [analyzingSpeakers, setAnalyzingSpeakers] = useState(false);
+  const [diarizeStatus, setDiarizeStatus] = useState("");
+  const [diarizeProgress, setDiarizeProgress] = useState(null);
 
-  async function checkWhisper() {
-    setChecking(true);
-    try {
-      setWhisperStatus(await invoke("check_whisper"));
-    } catch (err) {
-      setWhisperStatus(`Error: ${err}`);
-    } finally {
-      setChecking(false);
-    }
-  }
+  // The active generated voiceover, if any -- lifted up here (rather than
+  // kept local to VoiceoverSection) because VideoPreview needs it too, to
+  // play it alongside the loaded video directly (see VideoPreview.jsx),
+  // without writing a separately-merged file just to preview it.
+  const [voiceoverPath, setVoiceoverPath] = useState("");
+  const [voiceoverOffset, setVoiceoverOffset] = useState(0);
+
+  const { user, loading: authLoading } = useAuth();
+
+  // Splashscreen shows natively the instant the process starts (see
+  // tauri.conf.json) so there's no blank window while the webview spins
+  // up. A short minimum delay here keeps it from flashing away instantly
+  // on fast machines — this app mounts in well under that.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      invoke("close_splashscreen").catch(() => {});
+    }, 400);
+    return () => clearTimeout(timer);
+  }, []);
 
   async function pickVideo() {
     const selected = await open({ multiple: false, filters: VIDEO_FILTERS });
@@ -97,10 +65,45 @@ function App() {
       setWords([]);
       setPipelineStatus("");
       setBurnStatus("");
-      setCustomOverlays([]);
-      setDraftOverlay(defaultDraftOverlay());
+      setProsody([]);
+      setProsodyStatus("");
+      setSpeakers([]);
+      setDiarizeStatus("");
+      setVoiceoverPath("");
+      setVoiceoverOffset(0);
       setCurrentTime(0);
       setDuration(0);
+      // Auto-starts the moment a video is chosen -- no separate "Run
+      // pipeline" step. Passed the path directly rather than relying on
+      // the videoPath state var, since setVideoPath above hasn't
+      // committed yet in this same render cycle.
+      runPipelineFor(selected);
+    }
+  }
+
+  function handleVoiceoverReady(path, offsetSeconds, voiceoverWords) {
+    const offset = offsetSeconds ?? 0;
+    setVoiceoverPath(path);
+    setVoiceoverOffset(offset);
+
+    // The voiceover replaces the video's own audio, so its transcript
+    // (real word-level timestamps from re-transcribing it -- see
+    // VoiceoverSection.jsx) becomes the working transcript too: what
+    // Burn & Export burns, and what the Transcript panel/Timeline show.
+    // Shifted by `offset` so timestamps land where the voiceover audio
+    // actually plays against the video, same as the live-preview sync.
+    // If re-transcription failed, the *audio* swap still applies in
+    // Burn & Export (passed via voiceoverPath below) -- just leave the
+    // existing transcript in place rather than losing captions entirely.
+    if (voiceoverWords) {
+      setWords(voiceoverWords.map((w) => ({ ...w, start: w.start + offset, end: w.end + offset })));
+      // Prosody/diarization were computed against the old transcript's
+      // word count and timing -- stale now, would silently mismatch if
+      // burned alongside the new captions.
+      setProsody([]);
+      setProsodyStatus("");
+      setSpeakers([]);
+      setDiarizeStatus("");
     }
   }
 
@@ -111,53 +114,6 @@ function App() {
     setCurrentTime(t);
   }
 
-  // Draft text/duration/end-time are kept in sync: typing text auto-suggests
-  // a reading-comfortable duration (until the user overrides duration or
-  // end-time directly, at which point their choice sticks even as the text
-  // keeps changing).
-  function handleDraftTextChange(text) {
-    setDraftOverlay((prev) => ({
-      ...prev,
-      text,
-      duration_secs: prev.duration_touched ? prev.duration_secs : estimateReadingDurationSeconds(text),
-    }));
-  }
-
-  function handleDraftFieldChange(key, value) {
-    setDraftOverlay((prev) => ({ ...prev, [key]: value }));
-  }
-
-  function handleDraftDurationChange(durationSecs) {
-    setDraftOverlay((prev) => ({ ...prev, duration_secs: Math.max(0.1, durationSecs), duration_touched: true }));
-  }
-
-  function handleDraftEndTimeChange(endTime) {
-    setDraftOverlay((prev) => ({
-      ...prev,
-      duration_secs: Math.max(0.1, endTime - currentTime),
-      duration_touched: true,
-    }));
-  }
-
-  function handleAddOverlay() {
-    const trimmed = draftOverlay.text.trim();
-    if (!trimmed) return;
-    const start = currentTime;
-    const end = duration > 0 ? Math.min(start + draftOverlay.duration_secs, duration) : start + draftOverlay.duration_secs;
-    // Draft carries a couple of UI-only fields (duration_secs, duration_touched)
-    // that aren't part of the burned overlay's shape — drop those, keep
-    // everything else (style/animation fields) as-is.
-    const { duration_secs, duration_touched, text, ...styleFields } = draftOverlay;
-    setCustomOverlays((prev) => [...prev, { id: newOverlayId(), text: trimmed, start, end, ...styleFields }]);
-    // Clear the text and re-suggest a fresh duration, but keep the style
-    // choices — adding several similarly-styled overlays in a row is common.
-    setDraftOverlay((prev) => ({ ...prev, text: "", duration_secs: estimateReadingDurationSeconds(""), duration_touched: false }));
-  }
-
-  function handleRemoveOverlay(id) {
-    setCustomOverlays((prev) => prev.filter((o) => o.id !== id));
-  }
-
   function handleWordChange(index, text) {
     setWords((prev) => prev.map((w, i) => (i === index ? { ...w, word: text } : w)));
   }
@@ -166,18 +122,33 @@ function App() {
     setWords((prev) => prev.filter((_, i) => i !== index));
   }
 
-  async function runPipeline() {
-    if (!videoPath) return;
+  async function runPipelineFor(path) {
     setPipelineRunning(true);
     setPipelineStatus("");
     setPipelineProgress(null);
+    setDetectedLanguage(null);
     const startedAt = Date.now();
-    const unlisten = await listen("pipeline-progress", (event) => setPipelineProgress(event.payload));
+    const unlisten = await listen("pipeline-progress", (event) => {
+      setPipelineProgress(event.payload);
+    });
     try {
-      const result = await invoke("run_pipeline", { videoPath });
+      // Tanglish slang normalization is available in the backend
+      // (`slang::normalize_words`) but not exposed in this UI right now --
+      // deliberately, to keep the default flow to as few decisions as
+      // possible. Wire a toggle back in (e.g. in MoreOptionsModal) if it
+      // turns out to be missed.
+      const result = await invoke("run_pipeline", { videoPath: path, normalizeSlang: false });
       const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
       setWords(result.words);
-      setPipelineStatus(`Transcribed ${result.words.length} words in ${elapsed}.`);
+      setDetectedLanguage(result.detected_language ?? null);
+      // A silent video (see pipeline.rs's has_audio_stream check) comes
+      // back with an empty transcript, not an error -- worth a distinct
+      // message rather than the slightly odd "Transcribed 0 words."
+      setPipelineStatus(
+        result.words.length > 0
+          ? `Transcribed ${result.words.length} words in ${elapsed}.`
+          : "No audio track found on this video — add a voice-over below to add captions."
+      );
     } catch (err) {
       setPipelineStatus(`Error: ${err}`);
     } finally {
@@ -187,21 +158,72 @@ function App() {
     }
   }
 
+  async function analyzeProsody() {
+    if (!videoPath || words.length === 0) return;
+    setAnalyzingProsody(true);
+    setProsodyStatus("");
+    setProsodyProgress(null);
+    const startedAt = Date.now();
+    const unlisten = await listen("prosody-progress", (event) => setProsodyProgress(event.payload));
+    try {
+      const result = await invoke("analyze_prosody", { videoPath, words });
+      const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
+      setProsody(result);
+      setProsodyStatus(`Analyzed ${result.length} words in ${elapsed}.`);
+    } catch (err) {
+      setProsodyStatus(`Error: ${err}`);
+    } finally {
+      unlisten();
+      setAnalyzingProsody(false);
+      setProsodyProgress(null);
+    }
+  }
+
+  async function diarizeSpeakers() {
+    if (!videoPath || words.length === 0) return;
+    setAnalyzingSpeakers(true);
+    setDiarizeStatus("");
+    setDiarizeProgress(null);
+    const startedAt = Date.now();
+    const unlisten = await listen("diarize-progress", (event) => setDiarizeProgress(event.payload));
+    try {
+      const result = await invoke("diarize_speakers", { videoPath, words });
+      const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
+      setSpeakers(result);
+      const speakerCount = new Set(result.map((s) => s.speaker_id)).size;
+      setDiarizeStatus(`Found ${speakerCount} speaker${speakerCount === 1 ? "" : "s"} across ${result.length} segments in ${elapsed}.`);
+    } catch (err) {
+      setDiarizeStatus(`Error: ${err}`);
+    } finally {
+      unlisten();
+      setAnalyzingSpeakers(false);
+      setDiarizeProgress(null);
+    }
+  }
+
   function handleJumpCutApplied(result) {
-    // The timeline changed, so anything timed against the old one
-    // (custom overlays) can no longer be trusted — clear them rather
-    // than silently leave them pointing at the wrong moments. Video
-    // preview picks up the new file automatically via the videoPath prop.
+    // Video preview picks up the new file automatically via the videoPath prop.
     setVideoPath(result.output_path);
     setWords(result.words);
-    setCustomOverlays([]);
-    setDraftOverlay(defaultDraftOverlay());
     setCurrentTime(0);
     setDuration(0);
+    // Any active voiceover's sync offset was computed against the
+    // *pre-cut* video's timing — re-cutting invalidates it, the same
+    // staleness class handleVoiceoverReady guards prosody/speakers
+    // against.
+    setVoiceoverPath("");
+    setVoiceoverOffset(0);
   }
 
   async function burnCaptions() {
-    if (!videoPath || (words.length === 0 && customOverlays.length === 0)) return;
+    if (!videoPath || words.length === 0) return;
+
+    // No client-side freshness check here — burn_captions itself verifies
+    // (via a disk-persisted record, not React state) that videoPath hasn't
+    // changed since it was transcribed, and rejects with a clear error if
+    // it has. That holds even across separate app sessions/processes,
+    // which an in-memory check here would not.
+
     const outputPath = await save({ defaultPath: "captioned-output.mp4", filters: VIDEO_FILTERS });
     if (!outputPath) return;
 
@@ -215,8 +237,11 @@ function App() {
         videoPath,
         words,
         style: captionStyle,
-        customOverlays,
         outputPath,
+        prosody,
+        speakers,
+        voiceoverPath: voiceoverPath || null,
+        voiceoverOffsetSeconds: voiceoverPath ? voiceoverOffset : null,
       });
       const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
       setBurnStatus(`Saved captioned video to ${result} in ${elapsed}.`);
@@ -229,115 +254,56 @@ function App() {
     }
   }
 
+  if (authLoading) {
+    return (
+      <div className="container auth-screen">
+        <p className="subtitle">Loading…</p>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen />;
+  }
+
   return (
-    <div className="container">
-      <h1>🎬 Reels Caption App</h1>
-      <p className="subtitle">Local-first: Tauri + Rust + React + ffmpeg + whisper.cpp</p>
-
-      <section className="card">
-        <h2>1. Rust ↔ React bridge</h2>
-        <button onClick={sayHello}>Say hello from Rust</button>
-        {greeting && <p className="result">{greeting}</p>}
-      </section>
-
-      <section className="card">
-        <h2>2. Check ffmpeg (video engine)</h2>
-        <button onClick={checkFfmpeg} disabled={checking}>
-          Check ffmpeg version
-        </button>
-        {ffmpegVersion && <pre className="result">{ffmpegVersion}</pre>}
-      </section>
-
-      <section className="card">
-        <h2>3. Check whisper.cpp (transcription engine)</h2>
-        <button onClick={checkWhisper} disabled={checking}>
-          Check whisper.cpp binary
-        </button>
-        {whisperStatus && <pre className="result">{whisperStatus}</pre>}
-      </section>
-
-      <section className="card">
-        <h2>4. Select a video</h2>
-        <button onClick={pickVideo}>Choose video file…</button>
-        {videoPath && <p className="result">{videoPath}</p>}
-      </section>
-
-      <section className="card">
-        <h2>5. Transcribe (extract audio → whisper.cpp)</h2>
-        <button onClick={runPipeline} disabled={!videoPath || pipelineRunning}>
-          {pipelineRunning ? "Transcribing…" : "Run transcription pipeline"}
-        </button>
-        <ProgressBar progress={pipelineProgress} />
-        {pipelineStatus && <pre className="result">{pipelineStatus}</pre>}
-      </section>
-
-      {words.length > 0 && (
-        <section className="card">
-          <h2>6. Remove silence &amp; filler words (optional)</h2>
-          <p className="section-hint">
-            Cuts dead air and "um"/"uh" automatically, using the transcript timing you already have — no re-transcription
-            needed. Runs once; re-adding custom text after this keeps it in sync with the trimmed video.
-          </p>
-          <SilenceRemovalPanel videoPath={videoPath} words={words} onApplied={handleJumpCutApplied} />
-        </section>
-      )}
-
-      {videoPath && (
-        <section className="card">
-          <h2>7. Preview, edit transcript &amp; add custom text</h2>
-          <VideoPreview
-            videoRef={videoRef}
-            videoPath={videoPath}
-            currentTime={currentTime}
-            duration={duration}
-            words={words}
-            captionStyle={captionStyle}
-            overlays={customOverlays}
-            draftOverlay={draftOverlay}
-            onTimeUpdate={setCurrentTime}
-            onLoadedMetadata={setDuration}
-            onSeek={handleSeek}
-          />
-          <TranscriptEditor
-            words={words}
-            currentTime={currentTime}
-            onWordChange={handleWordChange}
-            onWordDelete={handleWordDelete}
-            onSeek={handleSeek}
-          />
-          <CustomTextOverlayEditor
-            currentTime={currentTime}
-            draft={draftOverlay}
-            onDraftTextChange={handleDraftTextChange}
-            onDraftFieldChange={handleDraftFieldChange}
-            onDraftDurationChange={handleDraftDurationChange}
-            onDraftEndTimeChange={handleDraftEndTimeChange}
-            overlays={customOverlays}
-            onAdd={handleAddOverlay}
-            onRemove={handleRemoveOverlay}
-            onSeek={handleSeek}
-          />
-        </section>
-      )}
-
-      <section className="card">
-        <h2>8. Style your transcript captions</h2>
-        <CaptionStyleEditor style={captionStyle} onChange={setCaptionStyle} />
-      </section>
-
-      <section className="card">
-        <h2>9. Burn captions &amp; custom text onto the video (ffmpeg)</h2>
-        <button onClick={burnCaptions} disabled={(words.length === 0 && customOverlays.length === 0) || burning}>
-          {burning ? "Burning…" : "Burn & save video"}
-        </button>
-        <ProgressBar progress={burnProgress} />
-        {burnStatus && <pre className="result">{burnStatus}</pre>}
-      </section>
-
-      <footer>
-        <p>Runs fully offline. No cloud calls, no per-user inference cost.</p>
-      </footer>
-    </div>
+    <AppShell
+      videoPath={videoPath}
+      videoRef={videoRef}
+      currentTime={currentTime}
+      duration={duration}
+      setCurrentTime={setCurrentTime}
+      setDuration={setDuration}
+      words={words}
+      pipelineStatus={pipelineStatus}
+      pipelineRunning={pipelineRunning}
+      pipelineProgress={pipelineProgress}
+      detectedLanguage={detectedLanguage}
+      captionStyle={captionStyle}
+      setCaptionStyle={setCaptionStyle}
+      burnStatus={burnStatus}
+      burning={burning}
+      burnProgress={burnProgress}
+      prosody={prosody}
+      analyzingProsody={analyzingProsody}
+      prosodyStatus={prosodyStatus}
+      prosodyProgress={prosodyProgress}
+      analyzeProsody={analyzeProsody}
+      speakers={speakers}
+      analyzingSpeakers={analyzingSpeakers}
+      diarizeStatus={diarizeStatus}
+      diarizeProgress={diarizeProgress}
+      diarizeSpeakers={diarizeSpeakers}
+      voiceoverPath={voiceoverPath}
+      voiceoverOffset={voiceoverOffset}
+      onVoiceoverReady={handleVoiceoverReady}
+      pickVideo={pickVideo}
+      handleSeek={handleSeek}
+      handleWordChange={handleWordChange}
+      handleWordDelete={handleWordDelete}
+      handleJumpCutApplied={handleJumpCutApplied}
+      burnCaptions={burnCaptions}
+    />
   );
 }
 

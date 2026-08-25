@@ -1,6 +1,6 @@
 // Removes silence and filler words ("um", "uh", ...) from a video —
 // classic "jump cut" editing, automated. Reuses word-level timestamps
-// we've already got from whisper.cpp (no VAD model needed for silence:
+// we've already got from the STT step (no VAD model needed for silence:
 // a "gap" is just the space between two consecutive words) and does the
 // whole cut in a single ffmpeg pass via the `select`/`aselect` filters,
 // rather than our segment-cut-and-concat machinery in segments.rs — that
@@ -14,7 +14,7 @@ use tauri::AppHandle;
 
 use crate::ffmpeg::{best_encoder, probe_duration_seconds, run_with_progress};
 use crate::pipeline::WordTimestamp;
-use crate::util::{cli_path, unique_temp_path};
+use crate::util::{cli_path, record_fresh_transcript, unique_temp_path};
 
 const PROGRESS_EVENT: &str = "jumpcut-progress";
 
@@ -204,6 +204,11 @@ pub async fn remove_silence_and_fillers(
     args.push(output_path_arg.clone());
 
     run_with_progress(&app, PROGRESS_EVENT, "trimming", args, Some(kept_duration)).await?;
+
+    // The trimmed output is a brand-new file with remapped word timings
+    // that are correct for it *right now* — record that so burn_captions
+    // trusts it without requiring a redundant re-transcription.
+    record_fresh_transcript(&app, &output_path_arg)?;
 
     Ok(JumpCutResult {
         output_path: output_path_arg,

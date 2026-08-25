@@ -17,7 +17,7 @@ use crate::util::emit_progress;
 /// (rather than an error) if ffprobe is missing or the duration can't be
 /// parsed — progress events still fire, just without a percent.
 pub async fn probe_duration_seconds(path: &str) -> Option<f64> {
-    let output = Command::new("ffprobe")
+    let output = Command::new(crate::bin_paths::ffprobe_path())
         .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path])
         .output()
         .await
@@ -28,6 +28,26 @@ pub async fn probe_duration_seconds(path: &str) -> Option<f64> {
     }
 
     String::from_utf8_lossy(&output.stdout).trim().parse::<f64>().ok()
+}
+
+/// Whether `path` has at least one audio stream -- checked before
+/// extracting audio for transcription, since a silent video (real content
+/// here: B-roll meant to get a generated voice-over, not a recording
+/// error) previously hit ffmpeg's own "Output file does not contain any
+/// stream" error and surfaced a raw stack trace as the very first thing a
+/// user saw after picking a video. Returns `false` (not an error) on any
+/// probe failure -- callers already treat "no audio" as a normal, expected
+/// case to route around, not a reason to fail outright.
+pub async fn has_audio_stream(path: &str) -> bool {
+    let output = Command::new(crate::bin_paths::ffprobe_path())
+        .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", path])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) => o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        Err(_) => false,
+    }
 }
 
 /// A hardware encoder is usually a much bigger win than any amount of CPU
@@ -81,7 +101,7 @@ impl Encoder {
 /// So instead of trusting the list, actually try a trivial 1-frame encode
 /// with each candidate and see if it succeeds.
 async fn encoder_actually_works(codec: &str) -> bool {
-    let output = Command::new("ffmpeg")
+    let output = Command::new(crate::bin_paths::ffmpeg_path())
         .args([
             "-y",
             "-f",
@@ -134,7 +154,7 @@ pub async fn run_capturing_progress(
     let mut full_args = vec!["-progress".to_string(), "pipe:1".to_string(), "-nostats".to_string()];
     full_args.extend(args);
 
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(crate::bin_paths::ffmpeg_path())
         .args(&full_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -194,3 +214,4 @@ pub async fn run_with_progress(
     emit_progress(app, event_name, stage, Some(100.0), None);
     Ok(())
 }
+
