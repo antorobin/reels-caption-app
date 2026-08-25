@@ -21,7 +21,9 @@ On failure: an error message on stderr and a nonzero exit.
 
 import argparse
 import json
+import shutil
 import sys
+import tempfile
 
 from openvoice import se_extractor
 from openvoice.api import ToneColorConverter
@@ -35,12 +37,22 @@ def main():
     parser.add_argument("--output", required=True, help="Output WAV path")
     args = parser.parse_args()
 
+    # se_extractor.get_se() defaults to caching VAD-split segments + speaker
+    # embeddings under a *relative* "processed/" directory -- resolved
+    # against whatever the current process's CWD happens to be, not
+    # anything under this script's own path. Confirmed the hard way: a
+    # real "processed/" directory full of scratch audio/embeddings ended up
+    # inside this project's own working tree (and got committed) before
+    # this was pinned to an explicit temp directory. Cleaned up in
+    # `finally` since nothing downstream needs these intermediate files.
+    cache_dir = tempfile.mkdtemp(prefix="openvoice-processed-")
+
     try:
         converter = ToneColorConverter(f"{args.checkpoint_dir}/config.json", device="cpu")
         converter.load_ckpt(f"{args.checkpoint_dir}/checkpoint.pth")
 
-        source_se, _ = se_extractor.get_se(args.source, converter, vad=True)
-        target_se, _ = se_extractor.get_se(args.reference, converter, vad=True)
+        source_se, _ = se_extractor.get_se(args.source, converter, target_dir=cache_dir, vad=True)
+        target_se, _ = se_extractor.get_se(args.reference, converter, target_dir=cache_dir, vad=True)
 
         converter.convert(
             audio_src_path=args.source,
@@ -52,6 +64,8 @@ def main():
     except Exception as e:  # noqa: BLE001 -- surfaced to the Rust caller as a plain error message
         print(f"clone_voice failed: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

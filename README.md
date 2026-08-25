@@ -622,6 +622,39 @@ cd reels-caption-app
 npm install
 ```
 
+## 3.1. Fetch bundled resources (one command, instead of hunting down each piece)
+
+```bash
+npm run fetch-resources
+```
+
+Downloads a single archive (`dev-resources.tar.gz`, ~1.1GB) from this repo's
+[GitHub Releases](../../releases) and unpacks it straight into
+`src-tauri/resources/` — everything below in one shot:
+
+- `resources/bin/` — ffmpeg + ffprobe (section 2)
+- `resources/llama/` — llama.cpp binaries + the Qwen2.5-0.5B-Instruct GGUF (section 2.3)
+- `resources/tts-models/en/` — Piper's English voices (section 2.6)
+- `resources/stt-models/ta/` — the converted Tamil Whisper checkpoint (section 2.2)
+- `resources/voice-clone-models/converter/` — the OpenVoice V2 checkpoint (section 2.7)
+
+**Why a release asset instead of Git — or Git LFS:** these are large, static
+binaries that never change once fetched. Vendoring them as plain git blobs
+would bloat every clone forever; Git LFS looks like the fix at first glance,
+but it bills by *both* storage and bandwidth *per clone*, regardless of how
+often the file actually changes — a single fresh clone of this repo would
+already exceed GitHub's free 1GB/month LFS bandwidth quota on its own. A
+release asset has none of that: a flat, generous 2GB-per-file limit, no
+recurring bandwidth accounting for the repo, and it's just a plain HTTPS
+download. That's exactly why the same mechanism is used to distribute the
+built `.msi`/`.dmg`/`.AppImage` installers themselves (section 6.1).
+
+This step needs a `v0.1.0`-or-later release to already exist with a
+`dev-resources.tar.gz` asset attached (true for this repo from its first
+release onward). If you'd rather fetch pieces individually — or you're
+building for a platform this script doesn't cover — every section below
+still documents the direct download/conversion steps for that one piece.
+
 ## 4. Set up Firebase authentication (required — this is the app's first screen)
 
 The app now gates everything behind a login/signup screen (`src/components/auth/AuthScreen.jsx`),
@@ -731,13 +764,100 @@ issues early.
 
 ## 6. Add an app icon (needed before bundling, not needed for `dev`)
 
-This scaffold ships with no icon files. Generate a full icon set from one
-square PNG (1024x1024 recommended):
+`src-tauri/icons/` already has a full generated icon set checked in. To
+regenerate it from a different logo (one square PNG, 1024x1024
+recommended):
 ```bash
 npm run tauri icon path/to/your-logo.png
 ```
-This creates `src-tauri/icons/` with all required sizes and formats. `tauri dev`
-works fine without this step; `tauri build` needs it.
+`tauri dev` works fine without an icon at all; `tauri build` needs one —
+this repo already has one, so building "just works."
+
+## 6.1. Build & distribute (Windows / macOS / Linux)
+
+`npm run tauri build` runs `vite build` then compiles the Rust backend in
+release mode and bundles installers for **whatever OS you run it on** —
+Tauri does not cross-compile a GUI app for a different OS from one
+machine (WebView2/WKWebView/webkit2gtk are all platform-native). To ship
+installers for all three, build on all three, natively or via CI (see
+"CI matrix" below) — there's no single command that produces all of them
+from one machine.
+
+`bundle.targets: "all"` in `tauri.conf.json` means "every installer format
+this OS supports," not "every OS" — so `npm run tauri build` alone already
+produces every relevant format for whichever platform runs it.
+
+### Windows — MSI specifically
+
+```bash
+npm run tauri build -- --bundles msi
+```
+Output: `src-tauri/target/release/bundle/msi/Reels Caption App_0.1.0_x64_en-US.msi`.
+Drop `-- --bundles msi` to also get the NSIS `.exe` installer
+(`bundle/nsis/*-setup.exe`) alongside it — `targets: "all"` builds both by
+default. First MSI build downloads the WiX Toolset v3 automatically
+(needs internet, one-time, cached after); `.exe`/NSIS similarly downloads
+`makensis`.
+
+### macOS
+
+Run the same command on a Mac:
+```bash
+npm run tauri build
+```
+Output: `src-tauri/target/release/bundle/dmg/*.dmg` and `macos/*.app`.
+Needs Xcode Command Line Tools (`xcode-select --install`). An unsigned
+`.app`/`.dmg` triggers Gatekeeper's "unidentified developer" warning on
+first launch (right-click → Open bypasses it) — real code signing +
+notarization needs an active Apple Developer account, out of scope for a
+test build.
+
+### Linux
+
+Same command on a Linux machine:
+```bash
+npm run tauri build
+```
+Output depends on what's installed on the build machine: `.deb`
+(`bundle/deb/*.deb`, needs `dpkg`), `.rpm` (`bundle/rpm/*.rpm`, needs
+`rpmbuild`), and `.AppImage` (`bundle/appimage/*.AppImage`, portable,
+runs without installing). Needs `webkit2gtk`/`libayatana-appindicator`
+and friends — see
+[Tauri's Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux)
+for the exact package list per distro.
+
+### CI matrix (the practical way to get all three from one push)
+
+[`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action) is
+the standard GitHub Actions workflow for this: a 3-OS build matrix
+(`windows-latest`, `macos-latest`, `ubuntu-latest`), each running `npm run
+tauri build` natively and uploading its own installers as release assets
+— not set up in this repo yet, but the natural next step if testing
+outgrows manual per-OS builds.
+
+### What a fresh install actually gets you
+
+The installer bundles ffmpeg/ffprobe, the local LLM (llama.cpp +
+Qwen2.5-0.5B-Instruct), Piper's English voices, and the Tamil font —
+**everything needed for caption styling/burning and title/hashtag
+generation works immediately after install, no setup.** Speech-to-text,
+voiceover generation, and voice cloning need their conda environments set
+up separately by whoever's testing (sections 2, 2.4, 2.6, 2.7) — those
+models are large and per-language/per-feature, so they're deliberately
+not bundled into the installer (same reasoning as the Indic Whisper
+checkpoints in `resources/stt-models/README.md`). Worth saying plainly to
+anyone you hand this to: **installing the MSI alone does not give you
+working transcription** — mention the conda setup steps, or they'll hit
+"STT engine not found" the moment they upload a video.
+
+### Before a real public release
+
+`identifier` in `tauri.conf.json` is still the scaffold's placeholder
+(`com.yourname.reelscaptionapp`) — fine for a one-off test build, but
+worth setting to something real (reverse-DNS, e.g. `com.yourcompany.reels`)
+before this identifier ends up baked into update metadata or app data
+paths on testers' machines, since changing it later means a fresh install
+path, not an in-place upgrade.
 
 ## 7. Model selection & language auto-detection (no dropdown anywhere)
 
@@ -937,6 +1057,7 @@ Done in this scaffold:
 - ~~Remove every language dropdown/pill and auto-detect language instead, for both transcription and voiceover generation.~~ — `stt::detect_spoken_language` (audio-based, via a small `Systran/faster-whisper-tiny` checkpoint) for speech-to-text, `src/lib/languages.js`'s `detectTextLanguage` (Unicode script-range heuristic) for text-to-speech, `pipeline.rs`/`stt.rs`/`shell/TranscribeStatus.jsx`/`shell/VoiceoverSection.jsx`, section 7.
 - ~~Make a generated voiceover actually sound like the original speaker, not just a fixed default voice.~~ — OpenVoice V2's `ToneColorConverter` (new `voice_clone.rs`, its own conda env) reshapes the synthesized clip's timbre to match a reference clip pulled from the loaded video, falling back to a gender-matched Piper voice or the plain default when cloning isn't possible — `tts.rs`'s `resolve_voice_reference`/`generate_voiceover`, section 2.7.
 - ~~Fix the live preview playing the video's original audio underneath an active voiceover.~~ — `VideoPreview.jsx`'s `<video muted={!!voiceoverPath}>` only took effect at the element's initial mount, a documented React special-case for media elements (the `muted` JSX prop isn't re-applied to the DOM node on later re-renders) — since a voiceover is normally generated well after the video element already exists, the mute never actually landed. Fixed with an effect that sets `videoRef.current.muted` imperatively whenever `voiceoverPath` changes. The burned/exported file was never affected — that's ffmpeg re-encoding the audio track directly, not this preview element.
+- ~~Make a fresh clone actually buildable without hunting down every model/binary by hand.~~ — `npm run fetch-resources` (`scripts/fetch-dev-resources.mjs`) downloads one ~1.1GB archive from this repo's GitHub Release and unpacks it into `src-tauri/resources/`, section 3.1. Also cleaned up real repo hygiene issues found along the way: OpenVoice's `se_extractor` was caching scratch audio/embeddings into a relative `processed/` directory that landed inside the working tree and got committed (`clone_voice.py` now pins it to a temp directory instead — see `voice_clone.rs`'s section 2.7); Git LFS was tried first for the large model files but dropped in favor of the release-asset approach once its per-clone bandwidth billing turned out to cost more than plain storage, given these files never change.
 
 Still open:
 1. Sidecar-bundle `ffmpeg` itself (https://v2.tauri.app/develop/sidecar/) so users don't need it on PATH.

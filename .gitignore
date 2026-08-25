@@ -28,3 +28,24 @@ src-tauri/resources/stt-models/*/
 # git (see README's voiceover setup section).
 src-tauri/resources/tts-models/en/*.onnx
 src-tauri/resources/tts-models/en/*.onnx.json
+
+# OpenVoice V2 converter checkpoint — large, fetched locally (see README's
+# voice cloning setup section).
+src-tauri/resources/voice-clone-models/
+
+# All of the above (ffmpeg/ffprobe, llama.cpp+Qwen, Piper voices, the Tamil
+# checkpoint, the OpenVoice checkpoint) are large, static binaries that
+# never change once fetched — a poor fit for Git LFS, which bills by
+# storage *and* per-clone bandwidth regardless of how often a file
+# actually changes. `npm run fetch-resources` downloads all of them in one
+# shot from the GitHub Release instead (see README) — no separate
+# per-model hunting, and no LFS quota involved.
+
+# OpenVoice's se_extractor caches VAD-split reference clips + speaker
+# embeddings here by default (a *relative* path, resolved against
+# whatever the current process's CWD happens to be) -- clone_voice.py
+# pins this to an explicit temp directory instead, but excluded here too
+# as a defensive backstop against it ever landing in the working tree
+# again.
+/processed/
+src-tauri/processed/
