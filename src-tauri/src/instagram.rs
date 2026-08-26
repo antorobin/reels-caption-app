@@ -9,11 +9,24 @@
 //
 // OAuth uses the standard desktop-app loopback pattern: open the system
 // browser to Meta's consent screen, catch the redirect on a short-lived
-// local HTTP listener, exchange the code for tokens entirely server-side
+// local HTTPS listener, exchange the code for tokens entirely server-side
 // (well, app-side) via Graph API. No cloud intermediary, no embedded
 // webview capturing credentials -- the user authenticates in their own
 // real browser, where their existing Facebook session/2FA/password
 // manager all just work normally.
+//
+// HTTPS, not HTTP -- confirmed the hard way against a real Meta app: a
+// plain `http://localhost:.../callback` redirect URI is rejected outright
+// (a real, longstanding Meta policy requiring OAuth redirects to be
+// HTTPS, not something specific to this app or a bug to work around a
+// different way). The listener below presents a self-signed certificate
+// generated fresh per sign-in attempt -- nothing needs it to be *trusted*
+// by anything, since the connection never leaves this machine, just
+// *present*, so the browser can complete the final redirect hop. The
+// browser shows a one-time "connection isn't private" interstitial for
+// that hop (self-signed, unavoidable without installing a locally-trusted
+// root CA on the user's machine -- a much bigger, more invasive ask this
+// deliberately doesn't do); the user clicks through it once per sign-in.
 //
 // Publishing itself (Phase 3 in the plan) is a separate module -- this
 // one only gets from "nothing connected" to "we have a Page access token
@@ -25,9 +38,17 @@ use tauri::{AppHandle, Manager};
 
 use crate::util::cli_path;
 
-const REDIRECT_URI: &str = "http://localhost:47829/instagram/callback";
+const REDIRECT_URI: &str = "https://localhost:47829/instagram/callback";
 const REDIRECT_PORT: &str = "47829";
-const OAUTH_SCOPES: &str = "instagram_business_basic,instagram_business_content_publish,pages_show_list";
+// Confirmed the hard way against a real app: `instagram_business_basic` /
+// `instagram_business_content_publish` are scope names for Meta's newer,
+// separate "Instagram API with Instagram Login" product (its own OAuth
+// domain, not this one) -- requesting them against the classic
+// `facebook.com/dialog/oauth` endpoint this app actually uses (via the
+// "Facebook Login for Business" product, since our Instagram Business
+// Account is discovered through a connected Facebook Page) fails with
+// "Invalid Scopes". These are the correct names for *this* endpoint.
+const OAUTH_SCOPES: &str = "pages_show_list,instagram_basic,instagram_content_publish";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
@@ -136,12 +157,25 @@ fn query_param(path_and_query: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Generates a fresh, self-signed "localhost" certificate for the
+/// listener below to present -- never cached, never installed into any
+/// system trust store. It only needs to exist, not be trusted: the
+/// browser's one-time "connection isn't private" interstitial is the
+/// expected, documented tradeoff for that (see this module's doc
+/// comment), not a bug.
+fn generate_localhost_certificate() -> Result<tiny_http::SslConfig, String> {
+    let rcgen::CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .map_err(|e| format!("Couldn't generate a local TLS certificate: {e}"))?;
+    Ok(tiny_http::SslConfig { certificate: cert.pem().into_bytes(), private_key: key_pair.serialize_pem().into_bytes() })
+}
+
 /// Waits (blocking, so run inside `spawn_blocking`) for exactly one
 /// request to the redirect URI, replies with a plain "you can close this
 /// tab" page, and returns the `code` query param -- or an error message
 /// from the `error_description` param if the user declined consent.
 fn wait_for_oauth_redirect() -> Result<String, String> {
-    let server = tiny_http::Server::http(format!("127.0.0.1:{REDIRECT_PORT}"))
+    let ssl_config = generate_localhost_certificate()?;
+    let server = tiny_http::Server::https(format!("127.0.0.1:{REDIRECT_PORT}"), ssl_config)
         .map_err(|e| format!("Couldn't start local sign-in listener on port {REDIRECT_PORT}: {e}"))?;
 
     // Real browsers issue a handful of incidental requests (favicon.ico,

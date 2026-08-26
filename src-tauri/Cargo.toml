@@ -46,13 +46,24 @@ tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# Minimal, sync, single-purpose local HTTP server -- used for the OAuth
-# loopback listener (instagram.rs) that catches Meta's redirect during
-# sign-in, and (in a later phase) the temporary local file server behind
-# a cloudflared tunnel for Instagram's media fetch. Deliberately not a
-# full async web framework (axum/actix) for what's just "catch one
-# request, serve one static file."
-tiny_http = "0.12"
+# Minimal, sync, single-purpose local HTTP(S) server -- used for the
+# OAuth loopback listener (instagram.rs) that catches Meta's redirect
+# during sign-in, and (in a later phase) the temporary local file server
+# behind a cloudflared tunnel for Instagram's media fetch. Deliberately
+# not a full async web framework (axum/actix) for what's just "catch one
+# request, serve one static file." "ssl-rustls" -- confirmed the hard
+# way that Meta rejects a plain http:// OAuth redirect URI even for
+# localhost (a real, longstanding policy, not specific to this app) --
+# needed so the loopback listener can actually terminate the https://
+# redirect Meta requires.
+tiny_http = { version = "0.12", features = ["ssl-rustls"] }
+# Generates the self-signed localhost certificate the listener above
+# presents -- nothing needs it to be *trusted* (it never leaves this
+# machine), just present, so the browser can complete the final redirect
+# hop. The browser will show a one-time "connection isn't private"
+# interstitial for that hop; documented in instagram.rs and the README
+# rather than something to design around.
+rcgen = "0.13"
 # Percent-encoding for the OAuth authorize URL's query params -- a
 # single-file, zero-dependency crate, safer than hand-rolling this and
 # missing an edge case that quietly breaks sign-in.

@@ -789,10 +789,16 @@ footer {
   font-size: 15px;
 }
 
+/* Deliberately plain hex values here, not var(--shell-*) -- those are
+   defined globally but with *dark*-theme values meant for the separate
+   DaVinci-style shell, not this "classic" white-background modal context
+   (.shell-modal). Using them here rendered a dark box under text that
+   was also dark (inherited from .shell-modal's own #1a1a1a), which is
+   exactly what made this invisible the first time. */
 .link-button {
   background: none;
   border: none;
-  color: var(--shell-accent, #3b82f6);
+  color: #3b82f6;
   padding: 0;
   font-size: 12.5px;
   text-decoration: underline;
@@ -802,12 +808,13 @@ footer {
 }
 
 .instagram-setup-guide {
-  background: var(--shell-bg-2, #f3f4f6);
-  border: 1px solid var(--shell-border, #e2e2e2);
+  background: #f5f5f5;
+  border: 1px solid #e2e2e2;
   border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 12px;
   font-size: 12.5px;
+  color: #1a1a1a;
 }
 
 .instagram-setup-guide ol {

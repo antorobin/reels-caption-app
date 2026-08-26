@@ -1188,6 +1188,21 @@ Firebase project for auth (section 4).
 - When asked which business portfolio to connect: pick your existing one
   rather than skipping it — no verification is required at this stage,
   and it simplifies discovering the linked Instagram account later.
+- **Add the specific permissions — easy to miss, and required.** Adding
+  the use case above does *not* automatically grant the underlying
+  permissions; the OAuth dialog rejects them with "Invalid Scopes" until
+  each is explicitly added. Open the use case → **Permissions and
+  features** → click **+ Add** on exactly these three:
+  - `pages_show_list`
+  - `instagram_basic`
+  - `instagram_content_publish`
+
+  Leave the `instagram_business_*` versions of these alone — those are
+  scope names for a different, newer login product ("Instagram API with
+  Instagram Login") this app doesn't use; requesting them against the
+  classic `facebook.com/dialog/oauth` endpoint this app actually calls
+  fails the same "Invalid Scopes" way, confirmed directly against a real
+  app while building this.
 - **App settings → Basic**: note the **App ID** and **App Secret** (click
   "Show", re-enter your Facebook password). These go into the app itself
   (see below), never into `.env` or any file that could end up in the git
@@ -1197,8 +1212,23 @@ Firebase project for auth (section 4).
   desktop app?" ON** (required for Meta to accept a `localhost` redirect
   URI at all) and set **Authorize callback URL** to exactly:
   ```
-  http://localhost:47829/instagram/callback
+  https://localhost:47829/instagram/callback
   ```
+  **Must be `https`, not `http`** — confirmed directly that Meta rejects
+  a plain `http://localhost` redirect outright, a real, longstanding
+  policy requiring OAuth redirects to be HTTPS even for localhost, not
+  something specific to this app. `instagram.rs`'s local listener
+  presents a self-signed certificate generated fresh per sign-in attempt
+  to satisfy this — nothing needs it to be *trusted* (the connection
+  never leaves your machine), just present, so your browser shows a
+  one-time "connection isn't private" interstitial on that final redirect
+  hop that you click through once per sign-in. Deliberately not "fixed"
+  by installing a locally-trusted root CA instead — that would be a
+  meaningfully more invasive, worse-security-posture change (any site
+  could then be silently vouched for by that CA, and unexpected
+  root-certificate installation is itself a common antivirus/EDR red
+  flag) for the sake of removing one occasional click.
+
   Leave **"App secret embedded in client"** OFF — that setting is for
   apps that ship the secret inside something publicly distributed
   (a mobile APK, a JS bundle) and restricts it to limited "client token"
@@ -1218,7 +1248,12 @@ Firebase project for auth (section 4).
 
 ### Connecting the account in the app
 
-**More options → Instagram** tab:
+**Settings → Instagram** (top menu bar — renamed from the old "Developer"
+menu, since Launch-at-login and Connect Instagram are both settings a
+normal user wants, not developer-only checks; those moved behind a
+"Troubleshoot" toggle in the same panel). The panel has its own
+condensed, click-by-click version of everything above built in — useful
+if you land here without having read this section first:
 1. Enter your **Meta App ID** and **App Secret**, click **Save** — this
    calls `save_instagram_app_config`, which writes them to
    `~/.reels-caption-app/instagram-app-config.json` (or the OS

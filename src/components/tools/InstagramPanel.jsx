@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-const REDIRECT_URI = "http://localhost:47829/instagram/callback";
+const REDIRECT_URI = "https://localhost:47829/instagram/callback";
 
 // Full walkthrough condensed for in-app display -- the same steps as the
 // README's section 9.1, verified interactively against a real Meta app
@@ -43,6 +43,25 @@ function SetupGuide() {
           select <strong>"Manage messaging &amp; content on Instagram"</strong> (not Facebook Login, not Marketing API).
         </li>
         <li>
+          <strong>Add the specific permissions</strong> (this step is easy to miss — the use case above doesn't add
+          these automatically): open the use case → <em>Permissions and features</em> → click <strong>+ Add</strong>{" "}
+          on exactly these three:
+          <ul>
+            <li>
+              <code>pages_show_list</code>
+            </li>
+            <li>
+              <code>instagram_basic</code>
+            </li>
+            <li>
+              <code>instagram_content_publish</code>
+            </li>
+          </ul>
+          Leave the <code>instagram_business_*</code> ones alone — those belong to a different, newer login product
+          this app doesn't use. Without adding these three, sign-in fails with "Invalid Scopes" even though the
+          names are otherwise correct.
+        </li>
+        <li>
           <strong>Get your credentials:</strong> <em>App settings → Basic</em> → copy the <strong>App ID</strong> and{" "}
           <strong>App Secret</strong> (click "Show") — paste them below.
         </li>
@@ -50,8 +69,11 @@ function SetupGuide() {
           <strong>Redirect URI:</strong> <em>App settings → Advanced → App authentication</em> → toggle{" "}
           <strong>"Native or desktop app?" ON</strong>, set <em>Authorize callback URL</em> to exactly:
           <pre className="result">{REDIRECT_URI}</pre>
-          Leave <strong>"App secret embedded in client" OFF</strong> — that's for apps that ship the secret
-          publicly, which this one never does.
+          It must be <strong>https</strong>, not http — Meta rejects a plain http redirect even for localhost.
+          Your browser will show a one-time "connection isn't private" warning on that final step since it's a
+          self-signed local certificate; click through it — that's expected, not a sign anything's wrong. Leave{" "}
+          <strong>"App secret embedded in client" OFF</strong> — that's for apps that ship the secret publicly,
+          which this one never does.
         </li>
         <li>
           <strong>Add yourself as a Tester</strong> (skips Meta's 2-4 week App Review): <em>App roles → Roles →
