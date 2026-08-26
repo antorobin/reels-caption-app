@@ -1,17 +1,17 @@
 import { useState } from "react";
 import { useAuth } from "../../context/AuthContext.jsx";
-import DeveloperToolsPanel from "./DeveloperToolsPanel.jsx";
+import SettingsPanel from "./SettingsPanel.jsx";
 
 function MenuBar() {
-  const [devToolsOpen, setDevToolsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const { user, logout } = useAuth();
 
   return (
     <header className="shell-menubar">
       <span className="shell-menubar-brand">🎬 Reels Caption App</span>
       <nav className="shell-menubar-menu">
-        <button type="button" className="shell-menubar-item" onClick={() => setDevToolsOpen(true)}>
-          Developer
+        <button type="button" className="shell-menubar-item" onClick={() => setSettingsOpen(true)}>
+          Settings
         </button>
       </nav>
 
@@ -25,16 +25,16 @@ function MenuBar() {
         </div>
       )}
 
-      {devToolsOpen && (
-        <div className="shell-modal-backdrop" onClick={() => setDevToolsOpen(false)}>
+      {settingsOpen && (
+        <div className="shell-modal-backdrop" onClick={() => setSettingsOpen(false)}>
           <div className="shell-modal" onClick={(e) => e.stopPropagation()}>
             <div className="shell-modal-header">
-              <h2>Developer tools</h2>
-              <button type="button" className="shell-modal-close" onClick={() => setDevToolsOpen(false)}>
+              <h2>Settings</h2>
+              <button type="button" className="shell-modal-close" onClick={() => setSettingsOpen(false)}>
                 ✕
               </button>
             </div>
-            <DeveloperToolsPanel />
+            <SettingsPanel />
           </div>
         </div>
       )}
