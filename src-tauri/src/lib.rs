@@ -37,6 +37,7 @@ mod proc_cleanup;
 mod segments;
 mod slang;
 mod stt;
+mod tray;
 mod tts;
 mod util;
 mod voice_clone;
@@ -96,6 +97,13 @@ fn check_ffmpeg() -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        // The launch-args payload (`Some(vec![...])`) only matters on
+        // platforms that re-exec the binary with extra flags to detect an
+        // autostart-triggered launch (Windows/Linux don't need this) --
+        // `None` is the documented default for "no special handling
+        // needed on start".
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .setup(|app| {
             bin_paths::init(app.handle());
             // Order matters: clear out anything orphaned by a *previous*
@@ -103,6 +111,8 @@ pub fn run() {
             // run's own children from ever doing the same.
             proc_cleanup::kill_orphaned_processes(&[bin_paths::ffmpeg_path(), bin_paths::ffprobe_path()]);
             proc_cleanup::init_kill_on_exit();
+
+            tray::init(app.handle())?;
 
             Ok(())
         })
@@ -128,6 +138,30 @@ pub fn run() {
             vosync::compute_voiceover_offset,
             vosync::sync_voice_over,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            // Tauri's own default behavior is to exit the whole app once
+            // the last window is gone -- true even for a window this app
+            // closed itself via `tray.rs`'s `destroy()` call, not just a
+            // user-driven close. Without this, closing the main window
+            // silently killed the entire process instead of leaving it
+            // running in the tray -- confirmed the hard way: `tray.rs`'s
+            // per-window `CloseRequested` handler alone (prevent default +
+            // destroy) was not enough.
+            //
+            // `tray.rs`'s Quit menu item calls `app.exit(0)`, which -- also
+            // confirmed the hard way, contrary to what its own docs
+            // suggest -- lands in this *same* preventable `ExitRequested`
+            // event rather than bypassing it. Unconditionally preventing
+            // exit here swallowed real Quit clicks along with ordinary
+            // window closes. `tray::QUITTING` is what actually
+            // distinguishes the two: only prevent exit when this wasn't a
+            // deliberate Quit.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if !tray::QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
