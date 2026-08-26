@@ -131,6 +131,7 @@ pub fn run() {
             ducking::duck_music,
             instagram::save_instagram_app_config,
             instagram::has_instagram_app_config,
+            instagram::open_external_url,
             instagram::connect_instagram_account,
             instagram::get_connected_instagram_account,
             instagram::disconnect_instagram_account,

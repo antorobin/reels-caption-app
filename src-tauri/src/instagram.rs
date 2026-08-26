@@ -67,6 +67,15 @@ pub fn has_instagram_app_config(app: AppHandle) -> bool {
     app_config_path(&app).map(|p| p.exists()).unwrap_or(false)
 }
 
+/// Opens a URL in the system's default browser -- used by the in-app
+/// setup guide's "Create Facebook Page" / "Open Meta Developer Apps"
+/// buttons (`InstagramPanel.jsx`), same underlying plugin the OAuth
+/// consent screen itself opens with.
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| format!("Couldn't open browser: {e}"))
+}
+
 /// What's persisted after a successful connect -- everything
 /// `voice_clone`... er, `instagram::publish_reel` (Phase 3) will need.
 /// `page_access_token` (not the raw user token) is what Instagram's own
