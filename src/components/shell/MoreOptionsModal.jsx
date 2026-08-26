@@ -2,6 +2,7 @@ import { useState } from "react";
 import CaptionStyleEditor from "../CaptionStyleEditor.jsx";
 import SilenceRemovalPanel from "../SilenceRemovalPanel.jsx";
 import DiarizePanel from "../tools/DiarizePanel.jsx";
+import InstagramPanel from "../tools/InstagramPanel.jsx";
 import KeywordsPanel from "../tools/KeywordsPanel.jsx";
 import ProsodyPanel from "../tools/ProsodyPanel.jsx";
 import VoSyncPanel from "../tools/VoSyncPanel.jsx";
@@ -13,6 +14,7 @@ const TABS = [
   { id: "diarize", label: "Speaker diarization" },
   { id: "vosync", label: "Voice-over sync (export)" },
   { id: "keywords", label: "Keywords & hashtags" },
+  { id: "instagram", label: "Instagram" },
 ];
 
 // Everything that doesn't need to be visible by default: less-common
@@ -76,6 +78,8 @@ function MoreOptionsModal({ onClose, videoPath, words, onJumpCutApplied, caption
           {activeTab === "vosync" && <VoSyncPanel videoPath={videoPath} />}
 
           {activeTab === "keywords" && <KeywordsPanel words={words} />}
+
+          {activeTab === "instagram" && <InstagramPanel />}
         </div>
       </div>
     </div>

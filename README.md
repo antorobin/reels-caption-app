@@ -1132,6 +1132,118 @@ generic multilingual model, since this project targets desktop first
 
 ---
 
+## 9.1. Background tray app & scheduled Instagram posting
+
+The app can now stay running in the system tray after the window closes
+(instead of quitting), launch at login, and — once fully wired up — post
+finished videos to Instagram at scheduled times with a native notification
+confirming each post. This is a multi-phase feature; here's where it
+actually stands and how to set up what exists so far.
+
+### What's done vs. in progress
+
+- **Done**: tray icon + menu (Open/Quit), "Launch at login" toggle
+  (Developer menu), and the background lifecycle itself — closing the
+  window destroys the WebView (not just hides it, to keep idle memory
+  low) and the process keeps running until Quit. See `tray.rs`.
+- **Done**: connecting an Instagram account via Meta's official Graph API
+  (`instagram.rs`, reachable from **More options → Instagram**) — this
+  section documents that setup.
+- **Not yet built**: the actual scheduler, the media-hosting bridge
+  (Instagram fetches video from a public URL; this app has none by
+  default), and the post-published notification. Connecting an account
+  today doesn't yet let you actually schedule or publish anything.
+
+### Why this uses Meta's official Graph API, not something unofficial
+
+Only the sanctioned `instagram_business_content_publish` permission path
+is used — the same one Buffer/Later/Hootsuite use. This **only works for
+an Instagram Business or Creator account linked to a Facebook Page** — a
+personal account cannot be automated this way, full stop, and this
+project doesn't attempt to route around that restriction. Each user
+registers their **own** Meta Developer App (App ID + Secret) rather than
+this project shipping a shared one — same reasoning as bringing your own
+Firebase project for auth (section 4).
+
+### Setup: Instagram account, Facebook Page, and Meta App
+
+**1. Instagram account**
+- Instagram app → your profile → **Edit Profile → Switch to Professional
+  Account** → choose **Creator** or **Business** (either works).
+
+**2. Facebook Page**
+- Go to `https://www.facebook.com/pages/creation/` → name it, pick a
+  category, **Create Page**. It doesn't need followers or content.
+- Link it to your Instagram account via **Accounts Center**: Facebook →
+  your profile picture → **Settings & Privacy → Settings → Accounts
+  Center → Add accounts → Instagram**, sign into the same Instagram
+  account. Confirm it under the Page's **Settings → Linked accounts**.
+
+**3. Meta Developer App**
+- Go to `https://developers.facebook.com/apps/` → **Create App** → type
+  **Business** → name it, add your email, create.
+- On the dashboard, **Add use cases** → filter to **All** or **Content
+  management** → select **"Manage messaging & content on Instagram"**
+  (not Facebook Login, not the Marketing API, not Fundraisers). Confirm.
+- When asked which business portfolio to connect: pick your existing one
+  rather than skipping it — no verification is required at this stage,
+  and it simplifies discovering the linked Instagram account later.
+- **App settings → Basic**: note the **App ID** and **App Secret** (click
+  "Show", re-enter your Facebook password). These go into the app itself
+  (see below), never into `.env` or any file that could end up in the git
+  repo or a distributed build — see the note under "Storing your App
+  ID/Secret" below for why that distinction matters.
+- **App settings → Advanced → App authentication**: toggle **"Native or
+  desktop app?" ON** (required for Meta to accept a `localhost` redirect
+  URI at all) and set **Authorize callback URL** to exactly:
+  ```
+  http://localhost:47829/instagram/callback
+  ```
+  Leave **"App secret embedded in client"** OFF — that setting is for
+  apps that ship the secret inside something publicly distributed
+  (a mobile APK, a JS bundle) and restricts it to limited "client token"
+  operations as damage control for that exposure. This app never ships
+  the secret anywhere; it stays in your own per-machine app-data folder,
+  entered once through the app's own UI. Turning it on would break the
+  token-exchange calls `instagram.rs` needs the full secret for.
+- **App roles → Roles → Instagram Testers → Add Instagram Testers** →
+  enter your Instagram username → send the invite. This is what lets the
+  app publish immediately, without Meta's 2-4 week App Review — it only
+  works for accounts explicitly added this way while the app stays in
+  Development Mode.
+- Accept the invite **from Instagram's side**: Instagram → profile →
+  **Settings → Apps and Websites → Tester Invites → Accept**. Back on the
+  Meta dashboard, the tester's status should flip from "Pending" to
+  "Active".
+
+### Connecting the account in the app
+
+**More options → Instagram** tab:
+1. Enter your **Meta App ID** and **App Secret**, click **Save** — this
+   calls `save_instagram_app_config`, which writes them to
+   `~/.reels-caption-app/instagram-app-config.json` (or the OS
+   equivalent), not anywhere touched by `npm run build` or git.
+2. Click **Connect Instagram** — opens your system browser to Meta's
+   consent screen (your existing Facebook session/2FA/password manager
+   all just work normally, since it's a real browser, not an embedded
+   webview). `instagram.rs` runs a short-lived local listener on port
+   `47829` to catch the redirect, exchanges the code for a token, upgrades
+   it to a ~60-day long-lived token, and discovers the linked Instagram
+   Business Account through the connected Page.
+3. Once connected, the panel shows `Connected as @yourusername`.
+
+**Storing your App ID/Secret — why not `.env`:** Firebase's `.env` (section
+4) works because those values are meant to be public-safe, baked into the
+built JS bundle at compile time and protected by Firebase's own security
+rules instead of secrecy. A Meta App Secret is a genuine secret — putting
+it in `.env` would compile it into the distributed app bundle, exactly the
+"secret embedded in a public client" exposure the Meta toggle above exists
+to warn about. `save_instagram_app_config` instead writes it at *runtime*,
+from a value you type into the app itself, straight to your own machine's
+app-data folder — never built, never committed, never shipped.
+
+---
+
 ## 10. Suggested next build steps
 
 Done in this scaffold:
@@ -1152,6 +1264,7 @@ Done in this scaffold:
 - ~~Make a generated voiceover actually sound like the original speaker, not just a fixed default voice.~~ — OpenVoice V2's `ToneColorConverter` (new `voice_clone.rs`, its own conda env) reshapes the synthesized clip's timbre to match a reference clip pulled from the loaded video, falling back to a gender-matched Piper voice or the plain default when cloning isn't possible — `tts.rs`'s `resolve_voice_reference`/`generate_voiceover`, section 2.7.
 - ~~Fix the live preview playing the video's original audio underneath an active voiceover.~~ — `VideoPreview.jsx`'s `<video muted={!!voiceoverPath}>` only took effect at the element's initial mount, a documented React special-case for media elements (the `muted` JSX prop isn't re-applied to the DOM node on later re-renders) — since a voiceover is normally generated well after the video element already exists, the mute never actually landed. Fixed with an effect that sets `videoRef.current.muted` imperatively whenever `voiceoverPath` changes. The burned/exported file was never affected — that's ffmpeg re-encoding the audio track directly, not this preview element.
 - ~~Make a fresh clone actually buildable without hunting down every model/binary by hand.~~ — `npm run fetch-resources` (`scripts/fetch-dev-resources.mjs`) downloads one ~1.1GB archive from this repo's GitHub Release and unpacks it into `src-tauri/resources/`, section 3.1. Also cleaned up real repo hygiene issues found along the way: OpenVoice's `se_extractor` was caching scratch audio/embeddings into a relative `processed/` directory that landed inside the working tree and got committed (`clone_voice.py` now pins it to a temp directory instead — see `voice_clone.rs`'s section 2.7); Git LFS was tried first for the large model files but dropped in favor of the release-asset approach once its per-clone bandwidth billing turned out to cost more than plain storage, given these files never change.
+- ~~Run in the system tray, launch at login, and connect an Instagram account for future scheduled posting.~~ — new `tray.rs` (tray icon, Launch-at-login toggle, close-to-tray window lifecycle) and `instagram.rs` (Meta Graph API OAuth connect, More options → Instagram), section 9.1. Two real bugs found via direct interactive testing: Tauri's default behavior exits the whole app once the last window is gone, even one this app destroyed itself, requiring an app-level `RunEvent::ExitRequested` handler; that fix then swallowed real Quit clicks too, since `app.exit()` turned out to route through that same preventable event rather than bypassing it as its docs suggest — fixed with a `tray::QUITTING` flag distinguishing the two. The scheduler and actual publish/media-hosting flow are not built yet.
 - ~~Let an installed app fetch the models it's missing, instead of a manual conda/curl dance.~~ — new `model_fetch.rs` + `shell/OptionalModelsBanner.jsx`: a one-click in-app download of a dedicated, smaller release asset (`optional-models.tar.gz`, Tamil transcription + voice cloning checkpoints only) into the same per-machine cache dir the app already falls back to. Deliberately not done inside the MSI installer itself — considered and rejected, since MSI's transactional install model handles long network operations poorly — section 6.1's "In-app model download."
 - ~~Sidecar-bundle `ffmpeg` itself so users don't need it on PATH.~~ — achieved via `bin_paths.rs`'s resources-based bundling (env var override → bundled resource → PATH fallback) rather than Tauri's dedicated [sidecar API](https://v2.tauri.app/develop/sidecar/) specifically — the practical goal (no PATH dependency in a built installer) is met either way; `npm run fetch-resources`/the installer's `bundle.resources` (`tauri.conf.json`) is what actually gets `ffmpeg.exe`/`ffprobe.exe` into every build, section 3.1.
 

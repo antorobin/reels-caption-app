@@ -27,6 +27,7 @@ mod content_ideas;
 mod diarize;
 mod ducking;
 mod ffmpeg;
+mod instagram;
 mod jumpcuts;
 mod llm;
 mod loudness;
@@ -98,6 +99,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         // The launch-args payload (`Some(vec![...])`) only matters on
         // platforms that re-exec the binary with extra flags to detect an
         // autostart-triggered launch (Windows/Linux don't need this) --
@@ -127,6 +129,11 @@ pub fn run() {
             content_ideas::generate_content_ideas,
             diarize::diarize_speakers,
             ducking::duck_music,
+            instagram::save_instagram_app_config,
+            instagram::has_instagram_app_config,
+            instagram::connect_instagram_account,
+            instagram::get_connected_instagram_account,
+            instagram::disconnect_instagram_account,
             jumpcuts::remove_silence_and_fillers,
             loudness::normalize_audio,
             model_fetch::check_optional_models,

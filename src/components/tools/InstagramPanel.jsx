@@ -1,0 +1,105 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+// Instagram account connection (the official Graph API OAuth flow --
+// instagram.rs's own doc comment explains why, and what this deliberately
+// doesn't do). App ID/Secret are saved locally (this machine's app-data
+// folder, never the git repo, never compiled into the app) via
+// save_instagram_app_config before "Connect Instagram" can run at all.
+function InstagramPanel() {
+  const [hasConfig, setHasConfig] = useState(false);
+  const [appId, setAppId] = useState("");
+  const [appSecret, setAppSecret] = useState("");
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [account, setAccount] = useState(null);
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    invoke("has_instagram_app_config").then(setHasConfig).catch(() => {});
+    invoke("get_connected_instagram_account").then(setAccount).catch(() => {});
+  }, []);
+
+  async function saveConfig() {
+    setSavingConfig(true);
+    setError("");
+    try {
+      await invoke("save_instagram_app_config", { appId: appId.trim(), appSecret: appSecret.trim() });
+      setHasConfig(true);
+      setAppSecret(""); // never keep the secret sitting in a form field longer than it has to
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSavingConfig(false);
+    }
+  }
+
+  async function connect() {
+    setConnecting(true);
+    setError("");
+    try {
+      const result = await invoke("connect_instagram_account");
+      setAccount(result);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function disconnect() {
+    await invoke("disconnect_instagram_account").catch(() => {});
+    setAccount(null);
+  }
+
+  return (
+    <div className="inspector-panel">
+      <h2>Instagram</h2>
+      <p className="section-hint">
+        Connects via Meta's official Graph API (the same sanctioned path Buffer/Later use) -- needs your own Meta
+        Developer App with the "Manage messaging & content on Instagram" use case, and an Instagram Business/Creator
+        account added as that app's Tester. See the README's Instagram setup section for the full click-by-click
+        walkthrough.
+      </p>
+
+      {!hasConfig && (
+        <>
+          <label className="field-row">
+            Meta App ID
+            <input type="text" value={appId} onChange={(e) => setAppId(e.target.value)} placeholder="e.g. 948785624912753" />
+          </label>
+          <label className="field-row">
+            Meta App Secret
+            <input type="password" value={appSecret} onChange={(e) => setAppSecret(e.target.value)} />
+          </label>
+          <button onClick={saveConfig} disabled={!appId.trim() || !appSecret.trim() || savingConfig}>
+            {savingConfig ? "Saving…" : "Save"}
+          </button>
+        </>
+      )}
+
+      {hasConfig && !account && (
+        <button onClick={connect} disabled={connecting}>
+          {connecting ? "Waiting for sign-in in your browser…" : "Connect Instagram"}
+        </button>
+      )}
+
+      {hasConfig && account && (
+        <>
+          <p className="result result-suggestion">Connected as @{account.username}</p>
+          <button onClick={disconnect}>Disconnect</button>
+        </>
+      )}
+
+      {hasConfig && (
+        <button type="button" className="optional-models-banner-dismiss" onClick={() => setHasConfig(false)} disabled={connecting}>
+          Change App ID / Secret
+        </button>
+      )}
+
+      {error && <pre className="result">{error}</pre>}
+    </div>
+  );
+}
+
+export default InstagramPanel;
