@@ -968,22 +968,18 @@ else.
 There is no language dropdown or pill switch anywhere in this app — every
 past version of this UI had one, and all of them are gone now:
 
-- **Speech-to-text** (`pipeline::transcribe_with_auto_language`): after
-  extracting audio, `stt::detect_spoken_language` identifies the spoken
-  language via a small pre-converted `Systran/faster-whisper-tiny`
-  checkpoint (`stt/detect_language.py`), used purely for its
-  `detect_language()` call — never for the actual transcription, which
-  stays on Parakeet/the Indic Whisper fine-tunes (too small/inaccurate
-  for that job, but language ID is a much easier task and this size is
-  trustworthy for it — verified directly on this project's own test
-  audio: 98.7% confidence on English, 95% on Tamil). The detected code is
-  then routed to whichever model matches, same as the old dropdown did
-  manually. A detected language with no matching model is a clear error
-  naming what was detected and what's supported (`stt::supported_language_names`),
-  not a silent misroute or a confusing downstream crash. Runs in the same
-  `stt` conda env as transcription (already depends on `faster-whisper`)
-  — no new environment needed. Used by both `run_pipeline` (the main
-  clip) and `transcribe_audio_file` (re-transcribing a voiceover).
+- **Speech-to-text** (`pipeline::transcribe_with_auto_language`, which
+  delegates to `mixed_language::transcribe_with_language_detection`):
+  after extracting audio, the spoken language is detected automatically
+  and routed to whichever model matches — Parakeet for English, the Tamil
+  checkpoint for Tamil — the same way the old dropdown did manually. A
+  detected language with no matching model is a clear error naming what
+  was detected and what's supported (`stt::supported_language_names`), not
+  a silent misroute or a confusing downstream crash. This also
+  automatically handles a video where different stretches are in
+  different supported languages (e.g. one person in Tamil, another in
+  English) — see section 7.4 for how. Used by both `run_pipeline` (the
+  main clip) and `transcribe_audio_file` (re-transcribing a voiceover).
 - **Text-to-speech** (`src/lib/languages.js`'s `detectTextLanguage`):
   the voiceover script's language is inferred client-side from the text
   itself before calling `generate_voiceover` — a zero-dependency Unicode
@@ -1010,7 +1006,7 @@ Known limitation: RTL scripts (Arabic, Hebrew) aren't specifically
 handled in the ASS caption output yet — the `ass` filter/libass path this
 app uses hasn't been verified to render right-to-left text correctly.
 
-### 7.2. Tanglish slang normalization (optional)
+### 7.3. Tanglish slang normalization (optional)
 
 The Transcribe panel's **Normalize Tanglish slang spelling** checkbox
 (off by default — preserves whatever spelling the STT engine produced)
@@ -1022,6 +1018,85 @@ preserving punctuation, capitalization style, and word timing. Pure
 local string matching — no model, no network call. Add more variant
 groups to `VARIANT_GROUPS` in `slang.rs` as you find them; it's a flat
 list, no retraining or reprocessing needed.
+
+### 7.4. Mixed-language videos (code-switching)
+
+No separate mode to pick, no checkbox — every video goes through the same
+segment-and-classify detection (`mixed_language.rs`) described here, which
+handles a video where different speakers (or the same speaker
+mid-sentence) use different supported languages, e.g. one person in Tamil,
+another in English, exactly as well as an ordinary single-language video.
+An earlier version of this feature was opt-in (a sidebar checkbox,
+"costs meaningfully more, don't run it for videos that don't need it") —
+removed once it became clear that detecting *reliably* is worth doing
+unconditionally: the old single-call whole-file `detect_spoken_language`
+this replaced had its own blind spot even for a plain single-language
+long-form video (Whisper's language-ID only examines roughly the first
+~30 seconds of whatever audio it's handed, silently ignoring the rest —
+see step 1's `MAX_SEGMENT_SECONDS_FOR_LANGUAGE_ID`), and a genuinely
+single-language video still collapses to exactly one chunk below, taking
+the same fast one-call transcription path as before with no slicing
+overhead at all.
+
+How it works, in order:
+1. **Segment first, language-agnostically** — `ffmpeg::detect_speech_segments`
+   runs ffmpeg's own `silencedetect` filter directly on the waveform to
+   find speech-vs-silence boundaries. Deliberately *not* derived from
+   word-level timestamps the way `jumpcuts.rs`'s silence-gap logic is:
+   getting word timestamps first would require already transcribing the
+   file in *some* one language, the exact chicken-and-egg problem this
+   avoids.
+   Any single segment longer than `MAX_SEGMENT_SECONDS_FOR_LANGUAGE_ID`
+   (8s) gets further subdivided into equal sub-windows purely for the
+   language-classification step below — Whisper's own language-ID only
+   ever examines roughly its first ~30 seconds of input, so without this a
+   long, pause-free stretch (confirmed on a real ~48-second continuous
+   take with no gap ≥0.5s anywhere) would get classified from only its
+   opening few seconds, silently ignoring everything after. The
+   same-language merge step (3, below) still recombines these sub-windows
+   into one contiguous transcription chunk afterward, so this doesn't
+   fragment the final transcription — only how finely language is
+   *sampled* across a long stretch.
+2. **Classify each segment's language** — `stt::detect_spoken_languages_batch`
+   runs a small `Systran/faster-whisper-tiny` detector, loaded once and run
+   over every segment in one process (`stt/detect_language_segments.py`)
+   instead of paying full model-load time per segment.
+3. **Merge for quality, not just correctness** — classifying and
+   transcribing every raw silence-bounded segment independently would
+   fragment the job into a lot of short clips, and less audio context per
+   STT call measurably hurts accuracy. So a segment too uncertain to trust
+   on its own inherits the nearest already-resolved neighbor's language
+   (checking both directions — a leading untrusted segment with no prior
+   neighbor yet still gets filled in from the next trusted one, rather than
+   being left stuck on a bogus guess) instead of forcing a split, and
+   consecutive segments that resolve to the same language are merged into
+   one contiguous chunk before transcribing. "Too uncertain to trust" is
+   confidence-led, not duration-led — a short but unambiguous detection
+   (this project's own benchmark: 98.7% on English, 91-95% on Tamil) is
+   trusted at any length past a tiny 0.35s floor; a lower-confidence one
+   needs at least 0.8s to stand on its own. Getting this backwards (originally
+   requiring both ≥1.2s duration *and* ≥55% confidence) was a real bug found
+   via a live test video full of short back-and-forth phrases: every short
+   genuine utterance always inherited its neighbor's language, so a short
+   English word next to Tamil speech got transcribed in Tamil script instead
+   of recognized as English — the model doesn't switch scripts on its own;
+   a language-specific fine-tune only ever outputs the one script it knows.
+4. **Transcribe each chunk** with the same `stt::transcribe_and_align` the
+   default pipeline uses (Parakeet for English, the Tamil checkpoint for
+   Tamil) — no new transcription logic, just called once per chunk instead
+   of once for the whole file, on a slightly padded audio slice (±0.15s,
+   into already-detected silence) so words right at a chunk boundary
+   aren't clipped mid-word.
+5. **Stitch** every chunk's words back into one timeline (shifting
+   timestamps from "relative to that chunk's slice" to "relative to the
+   full video") — the result is the same `PipelineResult` shape the
+   single-language pipeline returns, so TranscriptPanel, jump cuts, and
+   Burn & Export all work completely unchanged.
+
+A genuinely single-language video resolves to exactly one chunk after step
+3, so `transcribe_with_language_detection` skips straight to one whole-file
+`transcribe_and_align` call — steps 4-5's per-chunk slicing/stitching only
+actually run for a video that turns out to need them.
 
 ## 8. Build a distributable desktop app
 
@@ -1143,16 +1218,15 @@ actually stands and how to set up what exists so far.
 ### What's done vs. in progress
 
 - **Done**: tray icon + menu (Open/Quit), "Launch at login" toggle
-  (Developer menu), and the background lifecycle itself — closing the
+  (Settings menu), and the background lifecycle itself — closing the
   window destroys the WebView (not just hides it, to keep idle memory
   low) and the process keeps running until Quit. See `tray.rs`.
 - **Done**: connecting an Instagram account via Meta's official Graph API
-  (`instagram.rs`, reachable from **More options → Instagram**) — this
+  (`instagram.rs`, reachable from **Settings → Instagram**) — this
   section documents that setup.
-- **Not yet built**: the actual scheduler, the media-hosting bridge
-  (Instagram fetches video from a public URL; this app has none by
-  default), and the post-published notification. Connecting an account
-  today doesn't yet let you actually schedule or publish anything.
+- **Done**: the media-hosting bridge, the actual publish flow, and a
+  persisted scheduler with daily/weekly recurrence — see "Posting and
+  scheduling" below.
 
 ### Why this uses Meta's official Graph API, not something unofficial
 
@@ -1192,10 +1266,12 @@ Firebase project for auth (section 4).
   the use case above does *not* automatically grant the underlying
   permissions; the OAuth dialog rejects them with "Invalid Scopes" until
   each is explicitly added. Open the use case → **Permissions and
-  features** → click **+ Add** on exactly these three:
+  features** → click **+ Add** on exactly these five:
   - `pages_show_list`
   - `instagram_basic`
   - `instagram_content_publish`
+  - `business_management`
+  - `pages_read_engagement`
 
   Leave the `instagram_business_*` versions of these alone — those are
   scope names for a different, newer login product ("Instagram API with
@@ -1203,6 +1279,22 @@ Firebase project for auth (section 4).
   classic `facebook.com/dialog/oauth` endpoint this app actually calls
   fails the same "Invalid Scopes" way, confirmed directly against a real
   app while building this.
+
+  **Why the last two matter — Business Portfolio Pages:** if your
+  Facebook Page lives inside a **Business Portfolio** (Meta Business
+  Suite) rather than being a plain personally-created Page, `/me/accounts`
+  (the endpoint used to list which Pages you manage) returns an empty
+  list for that Page even with full Page access and the first three
+  permissions granted — confirmed live against a real account. `pages_show_list`
+  being silently dropped isn't the cause in that case; the Page just isn't
+  reachable through that endpoint at all for a Business-Portfolio-owned
+  Page. `instagram.rs` falls back to `/me/businesses` →
+  `/{business_id}/owned_pages` to reach it instead, which is what
+  `business_management` and `pages_read_engagement` are for. If your Page
+  is a plain personal Page (not inside a Business Portfolio), the first
+  three permissions alone are enough and `/me/accounts` finds it directly
+  — but requesting all five up front costs nothing and avoids hitting this
+  exact dead end later if you ever move the Page into a Business Portfolio.
 - **App settings → Basic**: note the **App ID** and **App Secret** (click
   "Show", re-enter your Facebook password). These go into the app itself
   (see below), never into `.env` or any file that could end up in the git
@@ -1264,8 +1356,75 @@ if you land here without having read this section first:
    webview). `instagram.rs` runs a short-lived local listener on port
    `47829` to catch the redirect, exchanges the code for a token, upgrades
    it to a ~60-day long-lived token, and discovers the linked Instagram
-   Business Account through the connected Page.
+   Business Account through the connected Page — trying `/me/accounts`
+   first, then falling back to `/me/businesses` → `/{business_id}/owned_pages`
+   for Pages that live inside a Business Portfolio (see the permissions
+   note above).
 3. Once connected, the panel shows `Connected as @yourusername`.
+
+### Posting and scheduling
+
+Once an account is connected, a **Schedule to Instagram** button sits next
+to **Burn & Export** — it's disabled until you've burned a video in the
+current session (scheduling posts the finished captioned file, not the raw
+source). Clicking it (`ScheduleToInstagramButton.jsx`) opens a small panel:
+
+- **Post now** — publishes immediately.
+- **Schedule once** — pick a date/time; fires exactly once.
+- **Add to daily/weekly recurring slot** — there's at most one daily and
+  one weekly schedule; each has its own FIFO queue, and this appends the
+  current video (with its own caption) to whichever slot's queue. The
+  first time you add to a slot, the date/time you pick sets that slot's
+  time-of-day (and, for weekly, day of week) going forward.
+- An **Upcoming** list shows every schedule's status, next run time, and
+  queue length, with a Remove button.
+
+**How publishing actually works** (`instagram.rs`'s `publish_reel` +
+`media_host.rs`): Instagram's Graph API fetches video from a public URL
+rather than accepting a direct upload, and this app has no permanent cloud
+storage, so each publish:
+1. Serves the video file from a tiny local HTTP server (`media_host.rs`,
+   via `tiny_http` — already a dependency for the OAuth listener above).
+2. Fronts it with a temporary `cloudflared` **quick tunnel** (no Cloudflare
+   account needed) so Instagram can reach it over a real public URL.
+   `cloudflared` itself is fetched on-demand from its own GitHub Releases
+   the first time it's needed (same idea as `model_fetch.rs`'s optional
+   model downloads) if it isn't already on your system PATH.
+3. Creates a media container (`POST /{ig-user-id}/media`), polls it until
+   Instagram reports `FINISHED` processing, then publishes it (`POST
+   /{ig-user-id}/media_publish`).
+4. Tears down both the tunnel and the local server immediately after,
+   success or failure — there's no standing cost between posts.
+
+**How scheduling actually works** (`scheduler.rs`): a single background
+task, spawned once in `lib.rs`'s `setup()`, ticks every 60 seconds on
+Tauri's own tokio runtime — no window needed, so a schedule still fires
+while the app sits tray-only with the window closed. Each tick finds due
+schedules, pops the next clip off that schedule's queue, calls
+`publish_reel`, and fires a native OS notification confirming success or
+failure (`tauri-plugin-notification`). A recurring schedule whose queue
+runs dry is marked "paused (queue empty)" rather than silently doing
+nothing, and un-pauses itself the next time a clip is added to it.
+Recurrence is deliberately plain duration math (add exactly 24h/7×24h to
+the stored next-run timestamp) rather than calendar-aware scheduling — it
+drifts by daylight-saving's ~1 hour twice a year, an accepted tradeoff for
+staying dependency-free.
+
+**Token expiry**: the connected account's long-lived token lasts ~60 days,
+but this refreshes itself automatically — every scheduler tick (60s) calls
+`instagram::refresh_instagram_token_if_needed`, which is a no-op until the
+token is within 5 days of expiring, then extends it (and re-derives a
+fresh Page access token) via Meta's `fb_exchange_token` grant, the same
+call used for the initial short-lived → long-lived exchange. This only
+works as long as the app runs (even just tray-resident) at least once
+every ~55 days — Meta's API can extend a token that still has time left,
+but can't revive one that's already fully expired. If that does happen (or
+if the account was connected before this refresh logic existed, which
+persisted no raw user token to refresh from), a scheduled post fails with
+a clear "reconnect in Settings" error (surfaced via the schedule's
+`last_result` and a failure notification) rather than a silent no-op, and
+reconnecting (Settings → Instagram → Connect Instagram) is the manual
+fallback.
 
 **Storing your App ID/Secret — why not `.env`:** Firebase's `.env` (section
 4) works because those values are meant to be public-safe, baked into the
@@ -1299,14 +1458,18 @@ Done in this scaffold:
 - ~~Make a generated voiceover actually sound like the original speaker, not just a fixed default voice.~~ — OpenVoice V2's `ToneColorConverter` (new `voice_clone.rs`, its own conda env) reshapes the synthesized clip's timbre to match a reference clip pulled from the loaded video, falling back to a gender-matched Piper voice or the plain default when cloning isn't possible — `tts.rs`'s `resolve_voice_reference`/`generate_voiceover`, section 2.7.
 - ~~Fix the live preview playing the video's original audio underneath an active voiceover.~~ — `VideoPreview.jsx`'s `<video muted={!!voiceoverPath}>` only took effect at the element's initial mount, a documented React special-case for media elements (the `muted` JSX prop isn't re-applied to the DOM node on later re-renders) — since a voiceover is normally generated well after the video element already exists, the mute never actually landed. Fixed with an effect that sets `videoRef.current.muted` imperatively whenever `voiceoverPath` changes. The burned/exported file was never affected — that's ffmpeg re-encoding the audio track directly, not this preview element.
 - ~~Make a fresh clone actually buildable without hunting down every model/binary by hand.~~ — `npm run fetch-resources` (`scripts/fetch-dev-resources.mjs`) downloads one ~1.1GB archive from this repo's GitHub Release and unpacks it into `src-tauri/resources/`, section 3.1. Also cleaned up real repo hygiene issues found along the way: OpenVoice's `se_extractor` was caching scratch audio/embeddings into a relative `processed/` directory that landed inside the working tree and got committed (`clone_voice.py` now pins it to a temp directory instead — see `voice_clone.rs`'s section 2.7); Git LFS was tried first for the large model files but dropped in favor of the release-asset approach once its per-clone bandwidth billing turned out to cost more than plain storage, given these files never change.
-- ~~Run in the system tray, launch at login, and connect an Instagram account for future scheduled posting.~~ — new `tray.rs` (tray icon, Launch-at-login toggle, close-to-tray window lifecycle) and `instagram.rs` (Meta Graph API OAuth connect, More options → Instagram), section 9.1. Two real bugs found via direct interactive testing: Tauri's default behavior exits the whole app once the last window is gone, even one this app destroyed itself, requiring an app-level `RunEvent::ExitRequested` handler; that fix then swallowed real Quit clicks too, since `app.exit()` turned out to route through that same preventable event rather than bypassing it as its docs suggest — fixed with a `tray::QUITTING` flag distinguishing the two. The scheduler and actual publish/media-hosting flow are not built yet.
+- ~~Run in the system tray, launch at login, and connect an Instagram account for future scheduled posting.~~ — new `tray.rs` (tray icon, Launch-at-login toggle, close-to-tray window lifecycle) and `instagram.rs` (Meta Graph API OAuth connect, Settings → Instagram), section 9.1. Several real bugs found via direct interactive testing: Tauri's default behavior exits the whole app once the last window is gone, even one this app destroyed itself, requiring an app-level `RunEvent::ExitRequested` handler; that fix then swallowed real Quit clicks too, since `app.exit()` turned out to route through that same preventable event rather than bypassing it as its docs suggest — fixed with a `tray::QUITTING` flag distinguishing the two. An abandoned OAuth attempt's local listener thread could permanently hold its port, fixed with a 5-minute `recv_timeout` deadline. And `/me/accounts` returns zero Pages for a Page that lives inside a Business Portfolio even with correct permissions — fixed with a `/me/businesses` → `/{business_id}/owned_pages` fallback, which needed two more scopes (`business_management`, `pages_read_engagement`) beyond the original three. The scheduler and actual publish/media-hosting flow are not built yet.
 - ~~Let an installed app fetch the models it's missing, instead of a manual conda/curl dance.~~ — new `model_fetch.rs` + `shell/OptionalModelsBanner.jsx`: a one-click in-app download of a dedicated, smaller release asset (`optional-models.tar.gz`, Tamil transcription + voice cloning checkpoints only) into the same per-machine cache dir the app already falls back to. Deliberately not done inside the MSI installer itself — considered and rejected, since MSI's transactional install model handles long network operations poorly — section 6.1's "In-app model download."
 - ~~Sidecar-bundle `ffmpeg` itself so users don't need it on PATH.~~ — achieved via `bin_paths.rs`'s resources-based bundling (env var override → bundled resource → PATH fallback) rather than Tauri's dedicated [sidecar API](https://v2.tauri.app/develop/sidecar/) specifically — the practical goal (no PATH dependency in a built installer) is met either way; `npm run fetch-resources`/the installer's `bundle.resources` (`tauri.conf.json`) is what actually gets `ffmpeg.exe`/`ffprobe.exe` into every build, section 3.1.
+- ~~Handle a video where different speakers use different supported languages (e.g. one in Tamil, one in English), transcribing each in its own language instead of picking one language for the whole file.~~ — new `mixed_language.rs` + `ffmpeg::detect_speech_segments` (language-agnostic silence-based segmentation) + `stt::detect_spoken_languages_batch` (one model load, many segments) + a same-language-run merge step to protect transcription quality (avoids feeding the STT model lots of short, low-context clips), replacing `pipeline.rs`'s old single whole-file `detect_spoken_language` call entirely rather than sitting behind an opt-in toggle — a single-language video still collapses to one fast whole-file transcription call, so there was no real cost to always detecting this way. Two real bugs found and fixed via real bilingual test videos (see section 7.4): a confidence-vs-duration threshold ordering bug that mistrusted short genuine utterances, and Whisper's language-ID only ever examining roughly its first ~30 seconds of whatever audio it's handed.
+- ~~Actually publish a finished video to Instagram, and let it be scheduled (one-off or recurring) instead of only connecting an account.~~ — new `media_host.rs` (temporary local file server + on-demand `cloudflared` quick tunnel, since Instagram fetches video from a public URL rather than accepting a direct upload) and `scheduler.rs` (persisted daily/weekly/once schedules, a 60-second background tick that runs even with the window closed, native notifications on each attempt), plus `instagram.rs`'s `publish_reel` (container → poll → publish). New **Schedule to Instagram** button (`ScheduleToInstagramButton.jsx`) next to Burn & Export. See section 9.1's "Posting and scheduling."
+- ~~Automatically refresh the connected Instagram account's token instead of requiring a manual reconnect every ~60 days.~~ — `instagram.rs`'s `refresh_instagram_token_if_needed`, checked every scheduler tick: extends the long-lived user token (and re-derives a fresh Page access token) via the same `fb_exchange_token` grant used for the initial exchange, once within 5 days of expiring. Needed persisting the raw long-lived user token (`IgAccount.user_access_token`, previously discarded right after deriving the Page token) — an account connected before this only refreshes after one manual reconnect.
 
 Still open:
 1. Live preview doesn't yet replicate every *burn animation* (karaoke fill, pop, bounce, typewriter, per-word highlight, slide, zoom, fade) — `VideoPreview.jsx` already shows real captions, live, correctly positioned and timed over the actual video frame (not a static style swatch), and cascade mode's per-word size/color pop is matched exactly, but classic mode's `animation` setting only affects the final burned output today; the live preview shows plain styled text for all of them.
 2. A path to bundling the `stt`/`tts`/`media-ai`/`voice-clone` conda *environments* themselves for zero end-user setup — see section 8.1's regression note. This is now a narrower gap than it used to be: `npm run fetch-resources` (developers) and the in-app "Download now" banner (installed end users, section 6.1) already handle every large model *file*, including the two that used to require a manual per-machine setup (Tamil transcription, voice cloning). What's left is specifically the Python packages/environments (torch, transformers, faster-whisper, openvoice, mediapipe, librosa, ...) — `conda-pack` is worth revisiting now that `stt`'s own dependency surface is lighter than it used to be.
 3. More Indian languages in `stt::INDIC_LANGUAGES`/`tts::TTS_INDIC_LANGUAGES` beyond Tamil — see `resources/stt-models/README.md`. Extending the auto-detection language list (section 7) is the same piece of work now that language selection is automatic rather than a dropdown.
+4. The local media server (`media_host.rs`) always returns the whole video file and ignores `Range` request headers — untested against a video large/slow enough for Instagram's fetcher to actually need partial/resumable requests.
 
 Everything above runs 100% locally — `llama-server.exe` is a *local* HTTP
 server bound to `127.0.0.1` only, not a remote one, so this is still

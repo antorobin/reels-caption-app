@@ -69,8 +69,18 @@ function MainPanel(props) {
             <ToolCard title="Music ducking" status="No music bed yet">
               <DuckingPanel videoPath={props.videoPath} words={props.words} />
             </ToolCard>
-            <ToolCard title="Title, hashtags & emoji" status="Not generated yet" badge="AI">
-              <ContentIdeasPanel words={props.words} />
+            <ToolCard
+              title="Title, hashtags & emoji"
+              status={props.contentIdeas ? "Generated" : "Not generated yet"}
+              badge="AI"
+            >
+              <ContentIdeasPanel
+                words={props.words}
+                result={props.contentIdeas}
+                generating={props.generatingContentIdeas}
+                error={props.contentIdeasError}
+                onGenerate={props.generateContentIdeas}
+              />
             </ToolCard>
           </div>
 

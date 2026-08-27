@@ -6,6 +6,8 @@ const STAGE_LABELS = {
   burning: "Burning captions",
   downloading: "Downloading",
   extracting: "Extracting",
+  segmenting: "Finding speech segments",
+  detecting_languages: "Detecting languages per segment",
 };
 
 export function formatElapsed(seconds) {

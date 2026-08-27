@@ -65,7 +65,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::pipeline::{WordTimestamp, PROGRESS_EVENT};
-use crate::util::{cli_path, emit_progress};
+use crate::util::{cli_path, emit_progress, unique_temp_path};
 
 pub const STT_ENV_NAME: &str = "stt";
 
@@ -262,29 +262,47 @@ pub fn get_supported_languages() -> Vec<&'static str> {
 }
 
 #[derive(Debug, Deserialize)]
-struct DetectLanguageOutput {
+struct SegmentLanguageResult {
+    start: f64,
+    end: f64,
     language: String,
     probability: f64,
 }
 
-/// Identifies the spoken language of `audio_path` via a small pre-converted
-/// Whisper-tiny checkpoint (`Systran/faster-whisper-tiny`), used purely for
-/// its `detect_language()` call -- never for actual transcription, which
-/// stays on Parakeet/the per-language Indic Whisper fine-tunes above. Runs
-/// in the same "stt" conda env (it already depends on faster-whisper) via a
-/// dedicated `detect_language.py` script. Returns the detected ISO 639-1
-/// code and the model's confidence (0-1). Verified directly on this
-/// project's own test audio: 98.7% confidence on English, 95% on Tamil.
-pub async fn detect_spoken_language(_app: &AppHandle, audio_path: &Path) -> Result<(String, f64), String> {
+/// Identifies the spoken language of each of `segments` via a small
+/// pre-converted Whisper-tiny checkpoint (`Systran/faster-whisper-tiny`),
+/// used purely for its `detect_language()` call -- never for actual
+/// transcription, which stays on Parakeet/the per-language Indic Whisper
+/// fine-tunes above. Loaded once and run over every segment within a
+/// single process (`detect_language_segments.py`) rather than once per
+/// segment, which `mixed_language.rs` can have dozens of and would
+/// otherwise pay full model-load time (a meaningful fraction of a second
+/// each) for repeatedly. Runs in the same "stt" conda env (it already
+/// depends on faster-whisper) -- no new environment needed. Verified
+/// directly on this project's own test audio: 98.7% confidence on
+/// English, 91-95% on Tamil.
+pub async fn detect_spoken_languages_batch(
+    audio_path: &Path,
+    segments: &[(f64, f64)],
+) -> Result<Vec<(f64, f64, String, f64)>, String> {
+    if segments.is_empty() {
+        return Ok(Vec::new());
+    }
     let prefix = resolve_stt_prefix().await?;
     let python = python_exe(&prefix);
 
-    let output = Command::new(&python)
-        .args([cli_path(&stt_script_path("detect_language.py")), cli_path(audio_path)])
+    let segments_json_path = unique_temp_path("lang-segments", "json");
+    let segments_json = serde_json::to_string(segments).map_err(|e| format!("Couldn't serialize segments: {e}"))?;
+    std::fs::write(&segments_json_path, segments_json).map_err(|e| format!("Couldn't write segments file: {e}"))?;
+
+    let result = Command::new(&python)
+        .args([
+            cli_path(&stt_script_path("detect_language_segments.py")),
+            cli_path(audio_path),
+            "--segments".to_string(),
+            cli_path(&segments_json_path),
+        ])
         .env("PYTHONIOENCODING", "utf-8")
-        // Works around a recurring Windows issue where huggingface_hub's
-        // default symlink caching fails with "A required privilege is not
-        // held by the client" unless Developer Mode is enabled.
         .env("HF_HUB_DISABLE_SYMLINKS", "1")
         .output()
         .await
@@ -294,17 +312,21 @@ pub async fn detect_spoken_language(_app: &AppHandle, audio_path: &Path) -> Resu
                  environment (see README) — or if it's already installed somewhere \
                  this couldn't find, set REELS_CAPTION_APP_STT_CONDA_PATH."
             )
-        })?;
+        });
+
+    let _ = std::fs::remove_file(&segments_json_path);
+    let output = result?;
 
     if !output.status.success() {
-        return Err(format!("Language detection failed: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(format!("Segment language detection failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
     let stdout_text = String::from_utf8_lossy(&output.stdout);
     let last_line = stdout_text.lines().last().unwrap_or_default();
-    let parsed: DetectLanguageOutput = serde_json::from_str(last_line)
-        .map_err(|e| format!("Couldn't parse language-detection output: {e} (raw: {stdout_text})"))?;
-    Ok((parsed.language, parsed.probability))
+    let parsed: Vec<SegmentLanguageResult> = serde_json::from_str(last_line)
+        .map_err(|e| format!("Couldn't parse segment language-detection output: {e} (raw: {stdout_text})"))?;
+
+    Ok(parsed.into_iter().map(|r| (r.start, r.end, r.language, r.probability)).collect())
 }
 
 pub async fn transcribe_and_align(

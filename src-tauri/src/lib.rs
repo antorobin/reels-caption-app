@@ -32,9 +32,12 @@ mod jumpcuts;
 mod llm;
 mod loudness;
 mod media_ai;
+mod media_host;
+mod mixed_language;
 mod model_fetch;
 mod pipeline;
 mod proc_cleanup;
+mod scheduler;
 mod segments;
 mod slang;
 mod stt;
@@ -116,6 +119,19 @@ pub fn run() {
 
             tray::init(app.handle())?;
 
+            // Runs once a minute on Tauri's own tokio runtime for as long
+            // as the process lives -- including while the window is closed
+            // and the app is tray-only, since this doesn't depend on any
+            // window existing. See scheduler.rs's doc comment.
+            let scheduler_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    scheduler::run_due_posts(&scheduler_app_handle).await;
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -135,11 +151,15 @@ pub fn run() {
             instagram::connect_instagram_account,
             instagram::get_connected_instagram_account,
             instagram::disconnect_instagram_account,
+            instagram::post_to_instagram_now,
             jumpcuts::remove_silence_and_fillers,
             loudness::normalize_audio,
             model_fetch::check_optional_models,
             model_fetch::optional_models_missing,
             model_fetch::download_optional_models,
+            scheduler::list_scheduled_posts,
+            scheduler::schedule_instagram_post,
+            scheduler::delete_scheduled_post,
             stt::get_supported_languages,
             tts::generate_voiceover,
             util::fingerprint_video_file,

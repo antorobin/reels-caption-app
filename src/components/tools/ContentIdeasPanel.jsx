@@ -1,25 +1,10 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 
-function ContentIdeasPanel({ words }) {
-  const [generating, setGenerating] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState("");
+// Generated result is lifted up to App.jsx (not local state here) so
+// ScheduleToInstagramButton can reuse the title+hashtags as a default
+// Instagram caption without a separate generation step.
+function ContentIdeasPanel({ words, result, generating, error, onGenerate }) {
   const [copied, setCopied] = useState("");
-
-  async function generate() {
-    setGenerating(true);
-    setError("");
-    setResult(null);
-    try {
-      const r = await invoke("generate_content_ideas", { words });
-      setResult(r);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setGenerating(false);
-    }
-  }
 
   function copy(text, label) {
     navigator.clipboard.writeText(text);
@@ -34,7 +19,7 @@ function ContentIdeasPanel({ words }) {
         Generated locally by Qwen2.5-0.5B-Instruct via llama.cpp — first run starts the model service, which can
         take a moment.
       </p>
-      <button onClick={generate} disabled={words.length === 0 || generating}>
+      <button onClick={onGenerate} disabled={words.length === 0 || generating}>
         {generating ? "Generating…" : "Generate title, description & hashtags"}
       </button>
       {words.length === 0 && <p className="result">Transcribe a video first.</p>}

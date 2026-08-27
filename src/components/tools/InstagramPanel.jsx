@@ -45,7 +45,7 @@ function SetupGuide() {
         <li>
           <strong>Add the specific permissions</strong> (this step is easy to miss — the use case above doesn't add
           these automatically): open the use case → <em>Permissions and features</em> → click <strong>+ Add</strong>{" "}
-          on exactly these three:
+          on exactly these five:
           <ul>
             <li>
               <code>pages_show_list</code>
@@ -56,10 +56,19 @@ function SetupGuide() {
             <li>
               <code>instagram_content_publish</code>
             </li>
+            <li>
+              <code>business_management</code>
+            </li>
+            <li>
+              <code>pages_read_engagement</code>
+            </li>
           </ul>
           Leave the <code>instagram_business_*</code> ones alone — those belong to a different, newer login product
-          this app doesn't use. Without adding these three, sign-in fails with "Invalid Scopes" even though the
-          names are otherwise correct.
+          this app doesn't use. Without adding these five, sign-in fails with "Invalid Scopes" even though the
+          names are otherwise correct. The last two matter specifically if your Facebook Page lives inside a{" "}
+          <strong>Business Portfolio</strong> (Meta Business Suite) rather than being a plain personal Page —
+          confirmed live that <code>/me/accounts</code> returns no Pages at all for that setup without them, even
+          with full Page access and the first three permissions granted.
         </li>
         <li>
           <strong>Get your credentials:</strong> <em>App settings → Basic</em> → copy the <strong>App ID</strong> and{" "}

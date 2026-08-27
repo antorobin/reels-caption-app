@@ -25,7 +25,8 @@ function Sidebar({ videoPath, onPickVideo }) {
           <p className="shell-sidebar-hint">Everything below runs automatically once a video loads.</p>
         )}
         <p className="shell-sidebar-hint">
-          Supported languages: {SUPPORTED_LANGUAGES.join(", ")} — detected automatically, no need to pick one.
+          Supported languages: {SUPPORTED_LANGUAGES.join(", ")} — detected automatically per speech segment, even
+          within one video (e.g. Tamil + English), no need to pick one.
         </p>
       </div>
     </aside>

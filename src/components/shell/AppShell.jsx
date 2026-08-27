@@ -41,6 +41,10 @@ function AppShell(props) {
         voiceoverPath={props.voiceoverPath}
         voiceoverOffset={props.voiceoverOffset}
         onVoiceoverReady={props.onVoiceoverReady}
+        contentIdeas={props.contentIdeas}
+        generatingContentIdeas={props.generatingContentIdeas}
+        contentIdeasError={props.contentIdeasError}
+        generateContentIdeas={props.generateContentIdeas}
       />
 
       <TranscriptPanel
@@ -57,6 +61,8 @@ function AppShell(props) {
         burnProgress={props.burnProgress}
         burnStatus={props.burnStatus}
         disabled={props.words.length === 0}
+        lastBurnedPath={props.lastBurnedPath}
+        contentIdeas={props.contentIdeas}
       />
 
       <OptionalModelsBanner />

@@ -13,10 +13,10 @@
 // trade off.
 //
 // No manual language selection anywhere in this pipeline: the spoken
-// language is detected automatically (`stt::detect_spoken_language`,
-// `transcribe_with_auto_language` below) and routed to whichever model
-// matches. A detected language this app has no model for is a clear error,
-// not a silent misroute.
+// language (or languages -- see mixed_language.rs) is detected
+// automatically and routed to whichever model(s) match. A detected
+// language this app has no model for is a clear error, not a silent
+// misroute.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -65,25 +65,17 @@ pub(crate) async fn extract_audio(app: &AppHandle, video_path: &str) -> Result<P
     Ok(audio_path)
 }
 
-/// Detects the spoken language of `audio_path` (see `stt::detect_spoken_language`)
-/// and transcribes it with the matching model, rejecting a detected
-/// language this app has no model for with a clear error rather than a
-/// confusing downstream failure.
+/// Detects the spoken language(s) of `audio_path` and transcribes it with
+/// the matching model(s) -- see `mixed_language.rs`'s
+/// `transcribe_with_language_detection` for how this both handles an
+/// ordinary single-language video (the common case, one fast whole-file
+/// STT call) and one where different stretches are in different supported
+/// languages, with no separate mode to opt into either way.
 async fn transcribe_with_auto_language(
     app: &AppHandle,
     audio_path: &Path,
 ) -> Result<(Vec<WordTimestamp>, Option<String>), String> {
-    let (code, probability) = crate::stt::detect_spoken_language(app, audio_path).await?;
-    if !crate::stt::is_supported_language_code(&code) {
-        return Err(format!(
-            "Detected spoken language '{code}' ({:.0}% confidence) isn't supported yet — \
-             this app currently supports: {}.",
-            probability * 100.0,
-            crate::stt::supported_language_names().join(", ")
-        ));
-    }
-    let (words, _echoed_language) = crate::stt::transcribe_and_align(app, audio_path, &code).await?;
-    Ok((words, Some(crate::stt::language_name_for_code(&code))))
+    crate::mixed_language::transcribe_with_language_detection(app, audio_path).await
 }
 
 #[tauri::command]

@@ -70,8 +70,11 @@ rcgen = "0.13"
 urlencoding = "2"
 # Async subprocess handling for ffmpeg/stt engines, so long-running jobs
 # don't block the webview's UI thread. Tauri already runs its own tokio
-# runtime under the hood; this just lets our commands hook into it.
-tokio = { version = "1", features = ["process", "io-util", "sync"] }
+# runtime under the hood; this just lets our commands hook into it. "time"
+# + "rt" added for the once-a-minute scheduler tick (scheduler.rs) and the
+# container-processing poll loop / cloudflared-tunnel-URL wait
+# (instagram.rs's publish flow, media_host.rs).
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt"] }
 # Talks to the bundled llama-server.exe's local HTTP completion API (see
 # llm.rs, plain http:// to 127.0.0.1 only) AND fetches optional model
 # checkpoints from this repo's GitHub Release over HTTPS (see

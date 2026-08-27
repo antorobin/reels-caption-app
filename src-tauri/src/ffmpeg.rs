@@ -10,7 +10,7 @@ use tauri::AppHandle;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::util::emit_progress;
+use crate::util::{cli_path, emit_progress};
 
 /// Best-effort media duration lookup via ffprobe, used to turn ffmpeg's
 /// raw "time processed so far" progress into a percentage. Returns `None`
@@ -48,6 +48,71 @@ pub async fn has_audio_stream(path: &str) -> bool {
         Ok(o) => o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
         Err(_) => false,
     }
+}
+
+/// How sensitive `detect_speech_segments` is to what counts as "silence" --
+/// anything quieter than this, for at least `SILENCE_MIN_DURATION_SECONDS`,
+/// is treated as a gap between speech segments. Tuned for already-extracted
+/// 16kHz mono PCM speech audio (see pipeline.rs's `extract_audio`), not
+/// arbitrary source material.
+const SILENCE_NOISE_THRESHOLD_DB: &str = "-35dB";
+const SILENCE_MIN_DURATION_SECONDS: f64 = 0.5;
+
+/// Language-agnostic speech segmentation via ffmpeg's own `silencedetect`
+/// filter, run directly on the waveform -- deliberately NOT derived from
+/// word-level timestamps the way `jumpcuts.rs`'s silence-gap logic is.
+/// `mixed_language.rs` needs segment boundaries *before* any transcription
+/// happens (it doesn't yet know what language each segment is in, which is
+/// the whole point), so word timestamps -- which would require already
+/// having transcribed the file in some one language -- aren't available yet
+/// and wouldn't be trustworthy for the "wrong" segments anyway.
+pub async fn detect_speech_segments(audio_path: &std::path::Path) -> Result<Vec<(f64, f64)>, String> {
+    let audio_path_arg = cli_path(audio_path);
+    let duration = probe_duration_seconds(&audio_path_arg)
+        .await
+        .ok_or("Couldn't determine audio duration for speech segmentation")?;
+
+    let filter = format!("silencedetect=noise={SILENCE_NOISE_THRESHOLD_DB}:d={SILENCE_MIN_DURATION_SECONDS}");
+    let output = Command::new(crate::bin_paths::ffmpeg_path())
+        .args(["-i", &audio_path_arg, "-af", &filter, "-f", "null", "-"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run ffmpeg silencedetect: {e}"))?;
+
+    // silencedetect reports on stderr regardless of success/failure of the
+    // (nonexistent, "-f null") output -- not a real error signal here.
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+
+    let mut silences: Vec<(f64, f64)> = Vec::new();
+    let mut pending_start: Option<f64> = None;
+    for line in stderr_text.lines() {
+        if let Some(rest) = line.split("silence_start: ").nth(1) {
+            pending_start = rest.split_whitespace().next().and_then(|s| s.parse::<f64>().ok());
+        } else if let Some(rest) = line.split("silence_end: ").nth(1) {
+            if let Some(start) = pending_start.take() {
+                let end = rest.split(|c: char| c == '|' || c.is_whitespace()).next().and_then(|s| s.parse::<f64>().ok());
+                if let Some(end) = end {
+                    silences.push((start, end));
+                }
+            }
+        }
+    }
+
+    // Speech segments are the complement of the detected silences, bounded
+    // by [0, duration].
+    let mut segments = Vec::new();
+    let mut cursor = 0.0;
+    for (silence_start, silence_end) in silences {
+        if silence_start > cursor {
+            segments.push((cursor, silence_start));
+        }
+        cursor = silence_end.max(cursor);
+    }
+    if cursor < duration {
+        segments.push((cursor, duration));
+    }
+
+    Ok(segments)
 }
 
 /// A hardware encoder is usually a much bigger win than any amount of CPU

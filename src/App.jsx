@@ -27,6 +27,7 @@ function App() {
   const [burnStatus, setBurnStatus] = useState("");
   const [burning, setBurning] = useState(false);
   const [burnProgress, setBurnProgress] = useState(null);
+  const [lastBurnedPath, setLastBurnedPath] = useState("");
 
   const [prosody, setProsody] = useState([]);
   const [analyzingProsody, setAnalyzingProsody] = useState(false);
@@ -44,6 +45,14 @@ function App() {
   // without writing a separately-merged file just to preview it.
   const [voiceoverPath, setVoiceoverPath] = useState("");
   const [voiceoverOffset, setVoiceoverOffset] = useState(0);
+
+  // AI-generated title/description/hook/hashtags -- lifted up here (rather
+  // than kept local to ContentIdeasPanel) so ScheduleToInstagramButton can
+  // reuse the title+hashtags as a default Instagram caption without a
+  // separate trip through the panel.
+  const [contentIdeas, setContentIdeas] = useState(null);
+  const [generatingContentIdeas, setGeneratingContentIdeas] = useState(false);
+  const [contentIdeasError, setContentIdeasError] = useState("");
 
   const { user, loading: authLoading } = useAuth();
 
@@ -65,12 +74,15 @@ function App() {
       setWords([]);
       setPipelineStatus("");
       setBurnStatus("");
+      setLastBurnedPath("");
       setProsody([]);
       setProsodyStatus("");
       setSpeakers([]);
       setDiarizeStatus("");
       setVoiceoverPath("");
       setVoiceoverOffset(0);
+      setContentIdeas(null);
+      setContentIdeasError("");
       setCurrentTime(0);
       setDuration(0);
       // Auto-starts the moment a video is chosen -- no separate "Run
@@ -128,6 +140,9 @@ function App() {
     setPipelineProgress(null);
     setDetectedLanguage(null);
     const startedAt = Date.now();
+    // Covers both a single-language video and one that switches languages
+    // mid-recording (e.g. Tamil + English) -- detected automatically on
+    // the backend (mixed_language.rs), no separate mode to pick here.
     const unlisten = await listen("pipeline-progress", (event) => {
       setPipelineProgress(event.payload);
     });
@@ -201,6 +216,20 @@ function App() {
     }
   }
 
+  async function generateContentIdeas() {
+    if (words.length === 0) return;
+    setGeneratingContentIdeas(true);
+    setContentIdeasError("");
+    try {
+      const result = await invoke("generate_content_ideas", { words });
+      setContentIdeas(result);
+    } catch (err) {
+      setContentIdeasError(String(err));
+    } finally {
+      setGeneratingContentIdeas(false);
+    }
+  }
+
   function handleJumpCutApplied(result) {
     // Video preview picks up the new file automatically via the videoPath prop.
     setVideoPath(result.output_path);
@@ -213,6 +242,14 @@ function App() {
     // against.
     setVoiceoverPath("");
     setVoiceoverOffset(0);
+    // The last burned file was rendered from words/audio that no longer
+    // match this freshly re-cut video -- scheduling it to Instagram now
+    // would post stale output.
+    setLastBurnedPath("");
+    // Same staleness reasoning -- generated title/hashtags were written
+    // against the pre-cut transcript.
+    setContentIdeas(null);
+    setContentIdeasError("");
   }
 
   async function burnCaptions() {
@@ -245,6 +282,7 @@ function App() {
       });
       const elapsed = formatElapsed((Date.now() - startedAt) / 1000);
       setBurnStatus(`Saved captioned video to ${result} in ${elapsed}.`);
+      setLastBurnedPath(result);
     } catch (err) {
       setBurnStatus(`Error: ${err}`);
     } finally {
@@ -297,12 +335,17 @@ function App() {
       voiceoverPath={voiceoverPath}
       voiceoverOffset={voiceoverOffset}
       onVoiceoverReady={handleVoiceoverReady}
+      contentIdeas={contentIdeas}
+      generatingContentIdeas={generatingContentIdeas}
+      contentIdeasError={contentIdeasError}
+      generateContentIdeas={generateContentIdeas}
       pickVideo={pickVideo}
       handleSeek={handleSeek}
       handleWordChange={handleWordChange}
       handleWordDelete={handleWordDelete}
       handleJumpCutApplied={handleJumpCutApplied}
       burnCaptions={burnCaptions}
+      lastBurnedPath={lastBurnedPath}
     />
   );
 }

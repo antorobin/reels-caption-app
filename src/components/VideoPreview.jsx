@@ -124,6 +124,34 @@ function VideoPreview({
   const [displayWidth, setDisplayWidth] = useState(0);
   const src = convertFileSrc(videoPath);
   const voiceoverAudioRef = useRef(null);
+  const videoFrameRef = useRef(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // The caption overlay is a sibling <div> of <video>, not a child of it --
+  // so the video element's own native fullscreen button (part of its
+  // `controls` UI) excludes the overlay entirely; a fullscreened <video>
+  // only ever shows the video's own pixels plus its native control bar,
+  // never other page DOM. Fullscreening `.video-frame` (the wrapper around
+  // both) instead is the only way to keep captions visible in fullscreen --
+  // confirmed the hard way: a user reported captions "not reflecting" an
+  // edit that was actually right there in the (non-fullscreen) preview the
+  // whole time, and it turned out they'd gone fullscreen via the video's
+  // own button to read small captions more easily and found none at all.
+  useEffect(() => {
+    function handleFullscreenChange() {
+      setIsFullscreen(document.fullscreenElement === videoFrameRef.current);
+    }
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      videoFrameRef.current?.requestFullscreen();
+    }
+  }
 
   useEffect(() => {
     function measure() {
@@ -240,7 +268,7 @@ function VideoPreview({
 
   return (
     <div className="video-preview">
-      <div className="video-frame">
+      <div className="video-frame" ref={videoFrameRef}>
         <video
           ref={videoRef}
           src={src}
@@ -275,6 +303,14 @@ function VideoPreview({
             )}
           </div>
         )}
+        <button
+          type="button"
+          className="video-fullscreen-button"
+          onClick={toggleFullscreen}
+          title={isFullscreen ? "Exit fullscreen" : "Fullscreen (includes captions, unlike the player's own button)"}
+        >
+          {isFullscreen ? "⤡" : "⤢"}
+        </button>
       </div>
 
       <div className="video-timeline">
