@@ -871,10 +871,12 @@ for the exact package list per distro.
 
 [`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action) is
 the standard GitHub Actions workflow for this: a 3-OS build matrix
-(`windows-latest`, `macos-latest`, `ubuntu-latest`), each running `npm run
-tauri build` natively and uploading its own installers as release assets
-— not set up in this repo yet, but the natural next step if testing
-outgrows manual per-OS builds.
+(`windows-latest`, `macos-latest`, `ubuntu-22.04`), each running `npm run
+tauri build` natively and uploading its own installers as release assets.
+**Set up as `.github/workflows/release.yml`**, triggered by pushing a
+version tag (`git push origin v0.2.0`) — see section 9.2's "Cutting a
+signed release" for the full flow, including the one-time repo secrets it
+needs for signing.
 
 ### What a fresh install actually gets you
 
@@ -1438,6 +1440,86 @@ app-data folder — never built, never committed, never shipped.
 
 ---
 
+## 9.2. Over-the-air updates
+
+The app checks for a newer signed release automatically on launch
+(`UpdateBanner.jsx`, silent unless one's actually available) and on demand
+(Settings → Updates). Built on Tauri's own `tauri-plugin-updater` — no
+custom update server, just a small static `latest.json` manifest and the
+signed installers themselves, both hosted as GitHub Release assets (the
+same free hosting this project already uses for the MSI/model downloads).
+Firebase was considered and rejected for this specifically: its free-tier
+Hosting bandwidth (360MB/day) is a real constraint for installer-sized
+files, where GitHub Releases has no comparable limit for a public repo —
+and it would mean standing up a second piece of infrastructure for
+something GitHub already does for free.
+
+### How it works
+
+Every update is cryptographically signed and verified before it's ever
+installed — this isn't optional, the updater refuses anything that doesn't
+match. Two keys, generated once via `npx tauri signer generate`:
+- **Public key** — safe to distribute, baked into `tauri.conf.json`'s
+  `plugins.updater.pubkey` at build time, so it ships inside every install.
+- **Private key** — the opposite. Never appears in the app, the repo, or
+  any build artifact; it only ever lives on whatever machine actually cuts
+  a release. If it ever leaked into a shipped binary, anyone could sign a
+  fake "update" this app would trust — the entire point of this scheme is
+  to prevent that.
+
+There's no expiry on this keypair (unlike a TLS certificate) — it works
+indefinitely unless you deliberately rotate it. What actually matters is
+**backup**, not expiry: lose the private key (not leak it — just lose it,
+e.g. a dead hard drive with no copy) and every already-installed copy has
+the *old* public key baked in with no way to ever verify a future update
+again, short of getting everyone onto a fresh manual reinstall with a new
+key. Store it somewhere durable and secret (a password manager, or a CI
+secret once releases move to CI) — it currently lives at
+`~/.tauri/reels-caption-app.key` on the machine that generated it, **not
+committed to git**, generated without a password for simplicity (minisign
+supports one; add `--password` to `tauri signer generate` for extra
+protection at the cost of needing to supply it at every future signing).
+
+### Cutting a signed release: `.github/workflows/release.yml` (automatic)
+
+Pushing a version tag is the entire release process — no manual per-OS
+`tauri build`, no hand-assembling `latest.json`:
+```bash
+# after bumping `version` in src-tauri/tauri.conf.json and package.json, committed:
+git tag v0.2.0
+git push origin v0.2.0
+```
+That triggers a 3-OS matrix build (`windows-latest`, `macos-latest`,
+`ubuntu-22.04`) via [`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action)
+— the same action the "CI matrix" note in section 6.1 pointed at, now
+actually wired up. Each OS builds and signs its own installer, and the
+action creates the GitHub Release for that tag, uploads every installer,
+and generates + uploads `latest.json` itself, matching the schema
+`tauri.conf.json`'s `plugins.updater.endpoints` expects.
+
+**One-time setup this can't do for you** — by design, since the whole
+point of the signing scheme is keeping the private key out of anything
+automatable/committable. Add these under the repo's *Settings → Secrets
+and variables → Actions*:
+- `TAURI_SIGNING_PRIVATE_KEY` — the contents of `~/.tauri/reels-caption-app.key`.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — only needed if that key was
+  generated with a password (it wasn't, by default, per the note above).
+
+This workflow hasn't been run end-to-end yet in this repo (that needs an
+actual tag push, a real CI run, and a real published release — not
+something to trigger speculatively) — built from Tauri's own documented,
+standard `tauri-action` recipe for exactly this use case, but worth
+watching the first real run closely rather than assuming it's flawless.
+
+**What this workflow does NOT cover**: the large asset archives
+(`dev-resources.tar.gz`, `optional-models.tar.gz`) are a separate,
+still-manual `gh release upload <tag> ... --clobber` step (see "Publishing
+a new release" above) — this workflow only builds/signs/publishes the app
+itself. Upload those to the same tag's release after the workflow
+finishes, same as before.
+
+---
+
 ## 10. Suggested next build steps
 
 Done in this scaffold:
@@ -1464,6 +1546,7 @@ Done in this scaffold:
 - ~~Handle a video where different speakers use different supported languages (e.g. one in Tamil, one in English), transcribing each in its own language instead of picking one language for the whole file.~~ — new `mixed_language.rs` + `ffmpeg::detect_speech_segments` (language-agnostic silence-based segmentation) + `stt::detect_spoken_languages_batch` (one model load, many segments) + a same-language-run merge step to protect transcription quality (avoids feeding the STT model lots of short, low-context clips), replacing `pipeline.rs`'s old single whole-file `detect_spoken_language` call entirely rather than sitting behind an opt-in toggle — a single-language video still collapses to one fast whole-file transcription call, so there was no real cost to always detecting this way. Two real bugs found and fixed via real bilingual test videos (see section 7.4): a confidence-vs-duration threshold ordering bug that mistrusted short genuine utterances, and Whisper's language-ID only ever examining roughly its first ~30 seconds of whatever audio it's handed.
 - ~~Actually publish a finished video to Instagram, and let it be scheduled (one-off or recurring) instead of only connecting an account.~~ — new `media_host.rs` (temporary local file server + on-demand `cloudflared` quick tunnel, since Instagram fetches video from a public URL rather than accepting a direct upload) and `scheduler.rs` (persisted daily/weekly/once schedules, a 60-second background tick that runs even with the window closed, native notifications on each attempt), plus `instagram.rs`'s `publish_reel` (container → poll → publish). New **Schedule to Instagram** button (`ScheduleToInstagramButton.jsx`) next to Burn & Export. See section 9.1's "Posting and scheduling."
 - ~~Automatically refresh the connected Instagram account's token instead of requiring a manual reconnect every ~60 days.~~ — `instagram.rs`'s `refresh_instagram_token_if_needed`, checked every scheduler tick: extends the long-lived user token (and re-derives a fresh Page access token) via the same `fb_exchange_token` grant used for the initial exchange, once within 5 days of expiring. Needed persisting the raw long-lived user token (`IgAccount.user_access_token`, previously discarded right after deriving the Page token) — an account connected before this only refreshes after one manual reconnect.
+- ~~Over-the-air updates, hosted economically instead of standing up a new backend.~~ — `tauri-plugin-updater` + `tauri-plugin-process`, checking a static `latest.json` manifest hosted as a GitHub Release asset (same free hosting this project already uses for the MSI/model downloads) rather than Firebase Hosting, whose free-tier bandwidth is a real constraint for installer-sized files. Every update is signed (a keypair generated via `tauri signer generate`; the public half ships in `tauri.conf.json`, the private half never leaves the release-building machine) and verified before installing. `UpdateBanner.jsx` checks silently on launch; Settings → Updates checks on demand. See section 9.2 — cutting an actual signed release is still a manual, undocumented-until-now process (no CI release pipeline exists yet), now written up there.
 
 Still open:
 1. Live preview doesn't yet replicate every *burn animation* (karaoke fill, pop, bounce, typewriter, per-word highlight, slide, zoom, fade) — `VideoPreview.jsx` already shows real captions, live, correctly positioned and timed over the actual video frame (not a static style swatch), and cascade mode's per-word size/color pop is matched exactly, but classic mode's `animation` setting only affects the final burned output today; the live preview shows plain styled text for all of them.

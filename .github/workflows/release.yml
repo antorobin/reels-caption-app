@@ -1,0 +1,75 @@
+# Cuts a signed, OTA-updatable GitHub Release automatically whenever a
+# version tag is pushed -- the "no manual `tauri build` per OS, no
+# hand-assembled latest.json" version of section 9.2's release process in
+# the README. Uses tauri-apps/tauri-action, the standard GitHub Actions
+# wrapper for Tauri releases: it runs `tauri build` on each OS in the
+# matrix, signs the output when the signing env vars below are present,
+# creates (or reuses) the GitHub Release for this tag, uploads every
+# installer as a release asset, and generates + uploads the `latest.json`
+# manifest tauri-plugin-updater's endpoint (tauri.conf.json) reads from --
+# all in one push, matching "no manual work" for cutting a release.
+#
+# One-time setup this workflow can't do for you (by design -- the whole
+# point of keeping the signing private key out of the repo): add these as
+# repo secrets under Settings -> Secrets and variables -> Actions:
+#   TAURI_SIGNING_PRIVATE_KEY          the *contents* of ~/.tauri/reels-caption-app.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD only if that key was generated with a password (it wasn't, by default -- see README section 9.2)
+#
+# To cut a release: bump `version` in src-tauri/tauri.conf.json and
+# package.json, commit, then `git tag v0.2.0 && git push origin v0.2.0`.
+# The pushed tag's name becomes the release's tag/name directly.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Lets you re-run this by hand from the Actions tab (e.g. to retry a
+  # failed platform) without needing to push a new tag.
+  workflow_dispatch:
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest"
+          - platform: "ubuntu-22.04"
+          - platform: "windows-latest"
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies (webview + tray icon support)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Reels Caption App ${{ github.ref_name }}"
+          releaseBody: "See the assets below to download and install this version. Already-installed copies will offer this update automatically."
+          releaseDraft: false
+          prerelease: false

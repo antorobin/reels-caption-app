@@ -42,6 +42,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -55,6 +56,14 @@
       "resources/tts-models": "tts-models",
       "resources/fonts/*": "fonts/",
       "resources/fonts-license/*": "fonts-license/"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCNzVFQjYxRjNDRjkyRjEKUldUeGtzL3pZZXQxYThyZ21aOEtQZm1IM0Z4TjQwREtkejhsNGdVemVsMlhGR3FGV1pvMkZyaTgK",
+      "endpoints": [
+        "https://github.com/antorobin/reels-caption-app/releases/latest/download/latest.json"
+      ]
     }
   }
 }

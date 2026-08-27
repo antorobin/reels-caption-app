@@ -1222,11 +1222,21 @@ footer {
   color: #1a1a1a;
 }
 
-.optional-models-banner {
+/* Wraps OptionalModelsBanner + UpdateBanner so they stack vertically
+   without overlapping if both happen to be showing at once, instead of
+   each independently fixed to the same bottom-left corner. */
+.bottom-left-stack {
   position: fixed;
   left: 24px;
   bottom: 24px;
   z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.optional-models-banner,
+.update-banner {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1250,6 +1260,41 @@ footer {
 }
 
 .optional-models-banner-dismiss {
+  background: transparent;
+  border: 1px solid var(--shell-border);
+  color: var(--shell-text-dim);
+}
+
+.update-banner-text {
+  font-size: 12.5px;
+  color: var(--shell-text-dim);
+  margin: 0;
+}
+
+.update-banner-notes {
+  display: block;
+  margin-top: 4px;
+  color: var(--shell-text);
+}
+
+.update-banner-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--shell-text-dim);
+}
+
+.update-banner-progress progress {
+  flex: 1;
+}
+
+.update-banner-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.update-banner-dismiss {
   background: transparent;
   border: 1px solid var(--shell-border);
   color: var(--shell-text-dim);

@@ -103,6 +103,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         // The launch-args payload (`Some(vec![...])`) only matters on
         // platforms that re-exec the binary with extra flags to detect an
         // autostart-triggered launch (Windows/Linux don't need this) --

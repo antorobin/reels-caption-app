@@ -40,6 +40,17 @@ tauri = { version = "2.0.0", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2.0.0"
 tauri-plugin-notification = "2"
+# Checks a static `latest.json` manifest (see tauri.conf.json's
+# `plugins.updater`) hosted as a GitHub Release asset -- same free,
+# already-used-by-this-project hosting as the MSI/dev-resources archives,
+# no separate update server needed. Every downloaded update is verified
+# against the public key baked into tauri.conf.json before installing;
+# the matching private key never ships anywhere, see the README's "Over-
+# the-air updates" section for the full signing story.
+tauri-plugin-updater = "2"
+# Restarts the app after an update installs -- the updater applies the new
+# version to disk but doesn't relaunch the process itself.
+tauri-plugin-process = "2"
 # Opens the system browser to Meta's OAuth consent screen (see
 # instagram.rs) -- the official Tauri v2 replacement for the old
 # plugin-shell "open" functionality, scoped to just this one job.

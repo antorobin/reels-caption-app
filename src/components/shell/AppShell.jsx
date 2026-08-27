@@ -4,6 +4,7 @@ import MenuBar from "./MenuBar.jsx";
 import OptionalModelsBanner from "./OptionalModelsBanner.jsx";
 import Sidebar from "./Sidebar.jsx";
 import TranscriptPanel from "./TranscriptPanel.jsx";
+import UpdateBanner from "./UpdateBanner.jsx";
 
 function AppShell(props) {
   return (
@@ -65,7 +66,10 @@ function AppShell(props) {
         contentIdeas={props.contentIdeas}
       />
 
-      <OptionalModelsBanner />
+      <div className="bottom-left-stack">
+        <OptionalModelsBanner />
+        <UpdateBanner />
+      </div>
     </div>
   );
 }
