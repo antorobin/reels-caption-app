@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // IMPORTANT: this must match the exact name of the Worker you created in the
+  // Cloudflare dashboard (Workers & Pages -> your project -> Settings -> General).
+  "name": "reels-caption-app",
+  "compatibility_date": "2025-05-05",
+  // Static-assets-only Worker: no server code, just serve Astro's build output.
+  // Cloudflare runs this from the "Root directory" (/website), so ./dist is website/dist.
+  "assets": {
+    "directory": "./dist"
+  }
+}
