@@ -1,0 +1,75 @@
+---
+import { audiences } from '../config/site.js';
+---
+
+<section class="section cs">
+  <div class="wrap cs__grid">
+    <div>
+      <span class="eyebrow">Built for the modern creator</span>
+      <h2 class="cs__title">Ideas and raw footage in. Polished reels out.</h2>
+      <p class="muted cs__lead">
+        Whether you produce content solo or run a whole social team, KraftReel.ai
+        helps you move faster, create better and publish smarter — with less
+        effort at every step.
+      </p>
+    </div>
+
+    <ul class="cs__list">
+      {audiences.map((a) => <li class="cs__item">{a}</li>)}
+    </ul>
+  </div>
+</section>
+
+<style>
+  .cs {
+    border-top: 1px solid var(--line-soft);
+  }
+
+  .cs__grid {
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: clamp(32px, 6vw, 72px);
+    align-items: center;
+  }
+
+  .cs__title {
+    margin-top: 18px;
+    font-size: clamp(26px, 4vw, 40px);
+  }
+
+  .cs__lead {
+    margin-top: 16px;
+    font-size: 16px;
+    max-width: 34rem;
+  }
+
+  .cs__list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .cs__item {
+    padding: 14px 16px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line);
+    background: var(--panel);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .cs__item::before {
+    content: '◆ ';
+    color: var(--teal);
+    font-size: 10px;
+  }
+
+  @media (max-width: 860px) {
+    .cs__grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

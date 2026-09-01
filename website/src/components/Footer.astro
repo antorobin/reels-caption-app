@@ -1,0 +1,73 @@
+---
+import { site } from '../config/site.js';
+const year = new Date().getFullYear();
+---
+
+<section class="closer">
+  <div class="wrap center">
+    <h2 class="closer__line">{site.closing}</h2>
+    <a class="btn" href="#download">Download KraftReel.ai</a>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="wrap foot__inner">
+    <span class="foot__brand">KRAFTREEL<span class="nav__dot" style="color:var(--teal)">.AI</span></span>
+    <nav class="foot__links">
+      <a href="#features">Features</a>
+      <a href="#workflow">Workflow</a>
+      <a href="#download">Download</a>
+      <a href={site.releasesUrl}>Releases</a>
+    </nav>
+    <span class="foot__copy">© {year} {site.name}</span>
+  </div>
+</footer>
+
+<style>
+  .closer {
+    padding-block: clamp(64px, 10vw, 128px);
+    background:
+      radial-gradient(600px 300px at 50% 0%, rgba(45, 212, 191, 0.12), transparent 70%);
+    border-top: 1px solid var(--line-soft);
+  }
+
+  .closer__line {
+    font-size: clamp(28px, 5vw, 52px);
+    letter-spacing: -0.03em;
+    background: linear-gradient(100deg, #eef2f7, #7fe6d9);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 28px;
+  }
+
+  .foot {
+    border-top: 1px solid var(--line-soft);
+    padding-block: 26px;
+  }
+
+  .foot__inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: var(--text-mute);
+  }
+
+  .foot__brand {
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+  }
+
+  .foot__links {
+    display: flex;
+    gap: 22px;
+  }
+
+  .foot__links a:hover {
+    color: var(--text);
+  }
+</style>

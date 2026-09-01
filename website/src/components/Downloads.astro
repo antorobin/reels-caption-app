@@ -1,0 +1,138 @@
+---
+import { downloads, site } from '../config/site.js';
+---
+
+<section class="section dl" id="download">
+  <div class="wrap">
+    <div class="center dl__head">
+      <span class="eyebrow" style="justify-content:center">Download KraftReel.ai</span>
+      <h2 class="dl__title">Get the studio on your machine</h2>
+      <p class="muted dl__lead">
+        A native desktop app — your footage never leaves your computer during
+        editing. Windows is available today; macOS and Linux are on the way.
+      </p>
+    </div>
+
+    <div class="dl__grid">
+      {
+        downloads.map((d) => (
+          <article class={`dl__card panel ${d.status === 'available' ? 'is-live' : ''}`}>
+            <div class="dl__top">
+              <span class="dl__os" aria-hidden="true">{d.id === 'windows' ? '⊞' : d.id === 'mac' ? '⌘' : '🐧'}</span>
+              <span class={`badge ${d.status === 'available' ? 'badge--live' : 'badge--soon'}`}>
+                <span class="dot" />
+                {d.status === 'available' ? 'Available now' : 'Launching soon'}
+              </span>
+            </div>
+
+            <h3>{d.label}</h3>
+            <p class="dl__note muted">{d.note}</p>
+            <p class="dl__arch">{d.arch}</p>
+
+            {d.status === 'available' ? (
+              <a class="btn dl__btn" href={d.url} download>
+                Download for {d.label}
+              </a>
+            ) : (
+              <span class="btn btn--ghost dl__btn is-soon">Notify me</span>
+            )}
+          </article>
+        ))
+      }
+    </div>
+
+    <p class="center dl__foot muted">
+      Version {site.version} ·
+      <a href={site.releasesUrl} class="dl__link">All releases &amp; changelog</a>
+    </p>
+  </div>
+</section>
+
+<style>
+  .dl__head {
+    max-width: 42rem;
+    margin-inline: auto;
+  }
+
+  .dl__title {
+    margin-top: 18px;
+    font-size: clamp(26px, 4vw, 40px);
+  }
+
+  .dl__lead {
+    margin-top: 14px;
+    font-size: 16px;
+  }
+
+  .dl__grid {
+    margin-top: 44px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+  }
+
+  .dl__card {
+    padding: 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .dl__card.is-live {
+    border-color: rgba(45, 212, 191, 0.35);
+    box-shadow: 0 24px 60px -40px rgba(45, 212, 191, 0.55);
+  }
+
+  .dl__top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+
+  .dl__os {
+    font-size: 24px;
+    line-height: 1;
+  }
+
+  .dl__card h3 {
+    font-size: 20px;
+  }
+
+  .dl__note {
+    font-size: 13.5px;
+  }
+
+  .dl__arch {
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+  }
+
+  .dl__btn {
+    margin-top: 16px;
+    width: 100%;
+  }
+
+  .dl__foot {
+    margin-top: 28px;
+    font-size: 13px;
+  }
+
+  .dl__link {
+    color: var(--teal);
+  }
+
+  .dl__link:hover {
+    text-decoration: underline;
+  }
+
+  @media (max-width: 900px) {
+    .dl__grid {
+      grid-template-columns: 1fr;
+      max-width: 420px;
+      margin-inline: auto;
+    }
+  }
+</style>

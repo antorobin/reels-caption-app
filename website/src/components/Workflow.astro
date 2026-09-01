@@ -1,0 +1,102 @@
+---
+import { workflow } from '../config/site.js';
+---
+
+<section class="section wf" id="workflow">
+  <div class="wrap">
+    <div class="wf__head">
+      <span class="eyebrow">The KraftReel flow</span>
+      <h2 class="wf__title">From raw video to ready-to-post</h2>
+      <p class="muted wf__lead">
+        KraftReel.ai turns a fragmented, multi-tool process into one seamless
+        creative experience. Just create — KraftReel helps you craft the rest.
+      </p>
+    </div>
+
+    <ol class="wf__steps">
+      {
+        workflow.map((step, i) => (
+          <li class="wf__step">
+            <span class="wf__num">{String(i + 1).padStart(2, '0')}</span>
+            <span class="wf__name">{step}</span>
+          </li>
+        ))
+      }
+    </ol>
+  </div>
+</section>
+
+<style>
+  .wf {
+    border-top: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line-soft);
+    background: linear-gradient(180deg, rgba(45, 212, 191, 0.04), transparent 40%);
+  }
+
+  .wf__head {
+    max-width: 46rem;
+  }
+
+  .wf__title {
+    margin-top: 18px;
+    font-size: clamp(26px, 4vw, 40px);
+  }
+
+  .wf__lead {
+    margin-top: 14px;
+    font-size: 16px;
+  }
+
+  .wf__steps {
+    margin: 44px 0 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .wf__step {
+    flex: 1 1 130px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 18px 16px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line);
+    background: var(--panel);
+    position: relative;
+  }
+
+  .wf__step:not(:last-child)::after {
+    content: '→';
+    position: absolute;
+    right: -13px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-mute);
+    font-size: 14px;
+    z-index: 1;
+  }
+
+  .wf__num {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: var(--teal);
+  }
+
+  .wf__name {
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  @media (max-width: 620px) {
+    .wf__step {
+      flex-basis: calc(50% - 12px);
+    }
+    .wf__step:not(:last-child)::after {
+      display: none;
+    }
+  }
+</style>

@@ -1,0 +1,85 @@
+---
+import { site } from '../config/site.js';
+---
+
+<header class="nav">
+  <div class="wrap nav__inner">
+    <a class="nav__brand" href="/">
+      <span class="nav__mark">KR</span>
+      <span class="nav__name">KRAFTREEL<span class="nav__dot">.AI</span></span>
+    </a>
+
+    <nav class="nav__links">
+      <a href="#features">Features</a>
+      <a href="#workflow">Workflow</a>
+      <a href="#download">Download</a>
+    </nav>
+
+    <div class="nav__cta">
+      <a class="btn btn--sm" href="#download">Get KraftReel</a>
+    </div>
+  </div>
+</header>
+
+<style>
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    backdrop-filter: blur(14px);
+    background: rgba(7, 10, 15, 0.72);
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .nav__inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    height: 68px;
+  }
+
+  .nav__brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+  }
+
+  .nav__mark {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    font-size: 12px;
+    background: linear-gradient(160deg, #34e0cb, #14b8a6);
+    color: #06231f;
+  }
+
+  .nav__name {
+    font-size: 14px;
+  }
+
+  .nav__dot {
+    color: var(--teal);
+  }
+
+  .nav__links {
+    display: flex;
+    gap: 28px;
+    font-size: 14px;
+    color: var(--text-dim);
+  }
+
+  .nav__links a:hover {
+    color: var(--text);
+  }
+
+  @media (max-width: 780px) {
+    .nav__links {
+      display: none;
+    }
+  }
+</style>

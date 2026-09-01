@@ -1,0 +1,20 @@
+# build output
+dist/
+.output/
+
+# deps
+node_modules/
+
+# astro
+.astro/
+
+# env & editor
+.env
+.env.production
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# cloudflare
+.wrangler/
