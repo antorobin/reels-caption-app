@@ -124,7 +124,11 @@
       "Bash(rm -rf \"C:/Users/MARSHA~1/AppData/Local/Temp/claude-verify-langdropdown\")",
       "Bash(rm -rf \"C:/Users/MARSHA~1/AppData/Local/Temp/claude-verify-final-mfa\")",
       "Bash(export PYTHONIOENCODING=utf-8 *)",
-      "Bash(rm -rf \"C:/Users/MARSHA~1/AppData/Local/Temp/claude-verify-whisperx2\")"
+      "Bash(rm -rf \"C:/Users/MARSHA~1/AppData/Local/Temp/claude-verify-whisperx2\")",
+      "Bash(\"/d/miniconda3/envs/tts/python.exe\" -c \"import transformers; print\\('transformers', transformers.__version__\\)\")",
+      "Bash(\"/d/miniconda3/envs/tts/python.exe\" -c \"from transformers import MusicgenForConditionalGeneration, AutoProcessor; print\\('musicgen import OK'\\)\")",
+      "Bash(\"/d/miniconda3/envs/tts/python.exe\" -c \"import torch; print\\('torch', torch.__version__\\)\")",
+      "Bash(\"/d/miniconda3/envs/tts/python.exe\" -c \"import scipy; print\\('scipy', scipy.__version__\\)\")"
     ]
   }
 }
