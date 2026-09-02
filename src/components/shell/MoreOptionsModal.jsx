@@ -5,6 +5,8 @@ import DiarizePanel from "../tools/DiarizePanel.jsx";
 import KeywordsPanel from "../tools/KeywordsPanel.jsx";
 import ProsodyPanel from "../tools/ProsodyPanel.jsx";
 import VoSyncPanel from "../tools/VoSyncPanel.jsx";
+import { CAPTION_THEMES } from "../../lib/themes.js";
+import { formatTime } from "../../lib/time.js";
 
 const TABS = [
   { id: "style", label: "Style captions" },
@@ -18,7 +20,21 @@ const TABS = [
 // Everything that doesn't need to be visible by default: less-common
 // refinements, tucked one click away instead of occupying permanent space
 // in the main flow. Each tab slots in an existing panel unchanged.
-function MoreOptionsModal({ onClose, videoPath, words, onJumpCutApplied, captionStyle, onCaptionStyleChange, ...toolProps }) {
+function MoreOptionsModal({
+  onClose,
+  videoPath,
+  words,
+  projectId,
+  onJumpCutApplied,
+  captionStyle,
+  onCaptionStyleChange,
+  captionThemeId,
+  onCaptionThemeIdChange,
+  onResetCaptionStyleToFactoryDefault,
+  captionStyleOverrides = [],
+  onRemoveCaptionStyleOverride,
+  ...toolProps
+}) {
   const [activeTab, setActiveTab] = useState("style");
 
   return (
@@ -45,9 +61,40 @@ function MoreOptionsModal({ onClose, videoPath, words, onJumpCutApplied, caption
         </div>
 
         <div className="more-options-body">
-          {activeTab === "style" && <CaptionStyleEditor style={captionStyle} onChange={onCaptionStyleChange} />}
+          {activeTab === "style" && (
+            <>
+              <CaptionStyleEditor
+                style={captionStyle}
+                onChange={onCaptionStyleChange}
+                themeId={captionThemeId}
+                onThemeIdChange={onCaptionThemeIdChange}
+                onResetToFactoryDefault={onResetCaptionStyleToFactoryDefault}
+              />
+              {captionStyleOverrides.length > 0 && (
+                <div className="caption-override-list">
+                  <h3>Style overrides</h3>
+                  <p className="section-hint">
+                    Drag a range directly on the timeline to add another — a portion styled differently from the rest of the video.
+                  </p>
+                  {captionStyleOverrides.map((o, i) => (
+                    <div key={i} className="caption-override-list-row">
+                      <span>
+                        {formatTime(o.start)} – {formatTime(o.end)}
+                      </span>
+                      <span>{CAPTION_THEMES.find((t) => t.id === o.themeId)?.name || "Custom"}</span>
+                      <button type="button" className="link-button" onClick={() => onRemoveCaptionStyleOverride(i)}>
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
 
-          {activeTab === "silence" && <SilenceRemovalPanel videoPath={videoPath} words={words} onApplied={onJumpCutApplied} />}
+          {activeTab === "silence" && (
+            <SilenceRemovalPanel videoPath={videoPath} words={words} projectId={projectId} onApplied={onJumpCutApplied} />
+          )}
 
           {activeTab === "prosody" && (
             <ProsodyPanel

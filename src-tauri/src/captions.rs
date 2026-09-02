@@ -103,6 +103,19 @@ pub struct CaptionStyle {
     pub accent_color: String, // "#RRGGBB", cascade mode's "current chunk" color
 }
 
+/// A different `CaptionStyle` applied to just one time range of the
+/// video, layered on top of the whole-video base style -- e.g. a cold
+/// open in one theme, the rest in another. Non-overlap between overrides
+/// is enforced by the frontend at creation time (never here), so the
+/// style-timeline algorithm below never has to arbitrate a tie between
+/// two overrides covering the same instant.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CaptionStyleOverride {
+    pub start: f64,
+    pub end: f64,
+    pub style: CaptionStyle,
+}
+
 fn default_words_per_line() -> usize {
     4
 }
@@ -145,6 +158,24 @@ fn hex_to_ass_color_with_opacity(hex: &str, opacity_percent: f32) -> Result<Stri
 fn hex_to_ass_color(hex: &str) -> Result<String, String> {
     hex_to_ass_color_with_opacity(hex, 100.0)
 }
+
+/// ASS Style-line SecondaryColour for `animation: "karaoke"` — the color a
+/// word shows *before* its own `\k` duration elapses; PrimaryColour (the
+/// style's own `text_color`) is what it switches to once "sung". A muted
+/// gray, opaque (alpha byte 00), matching the same pre-word gray the
+/// `"highlight"` animation already uses via its inline `\c&H808080&`
+/// override (see `build_animated_text`) — same visual grammar, one fixed
+/// constant instead of a duplicated literal.
+///
+/// Verified directly against real libass output (not assumed from the ASS
+/// spec): a throwaway ffmpeg render with deliberately distinct Primary/
+/// Secondary colors showed Secondary before a word's `\k` time and Primary
+/// after, with the burned frame otherwise byte-identical either side of
+/// that boundary. Before this fix, `build_style_line` passed the same
+/// value for both fields — Secondary == Primary means no visible sweep at
+/// all, only inert `\k` timing tags; confirmed via the same kind of render,
+/// reproducing today's code path, byte-identical before vs. after.
+const KARAOKE_SECONDARY_COLOUR: &str = "&H00808080";
 
 /// Inline override-tag color (`\c&HBBGGRR&`) — distinct from the Style-line
 /// format above, which carries a leading alpha byte and no delimiter.
@@ -258,7 +289,7 @@ fn build_style_line(
         if is_box { hex_to_ass_color_with_opacity(background_color, background_opacity)? } else { "&H00000000".to_string() };
 
     Ok(format!(
-        "Style: {name},{font_family},{font_size},{primary},{primary},{outline},{back_colour},{bold_flag},{italic_flag},0,0,100,100,{letter_spacing},0,{border_style},3,{shadow_size},{alignment},40,40,{margin_v},1\n"
+        "Style: {name},{font_family},{font_size},{primary},{KARAOKE_SECONDARY_COLOUR},{outline},{back_colour},{bold_flag},{italic_flag},0,0,100,100,{letter_spacing},0,{border_style},3,{shadow_size},{alignment},40,40,{margin_v},1\n"
     ))
 }
 
@@ -508,11 +539,76 @@ fn build_cascade_text(
     Ok(out)
 }
 
+/// One slice of the video's timeline that renders with one particular
+/// style -- the base style fills every gap around/between the (already
+/// sorted, non-overlapping) `overrides`. Together the returned pieces
+/// exactly partition `[0, +infinity)` with no gaps or overlaps; the open
+/// upper bound means the *last* piece always covers "the rest of the
+/// video" without needing to know its actual duration here.
+struct StylePiece<'a> {
+    start: f64,
+    end: f64,
+    style: &'a CaptionStyle,
+    name: String,
+}
+
+fn build_style_timeline<'a>(sorted_overrides: &'a [CaptionStyleOverride], base: &'a CaptionStyle) -> Vec<StylePiece<'a>> {
+    let mut pieces = Vec::new();
+    let mut cursor = 0.0_f64;
+    for (i, ov) in sorted_overrides.iter().enumerate() {
+        if ov.start > cursor {
+            pieces.push(StylePiece { start: cursor, end: ov.start, style: base, name: "Default".to_string() });
+        }
+        pieces.push(StylePiece { start: ov.start, end: ov.end, style: &ov.style, name: format!("Override{i}") });
+        cursor = cursor.max(ov.end);
+    }
+    pieces.push(StylePiece { start: cursor, end: f64::INFINITY, style: base, name: "Default".to_string() });
+    pieces.retain(|p| p.end > p.start);
+    pieces
+}
+
+/// One caption chunk, tagged with which `StylePiece` (by index into the
+/// timeline `build_style_timeline` returned) it was chunked under --
+/// `piece_index` is what lets cascade mode's "previous phrase" line know
+/// whether the prior chunk actually belongs to the *same* style piece
+/// (see `build_ass_document` below) rather than stitching the tail of one
+/// override onto the head of the next.
+struct ChunkPiece<'a> {
+    piece_index: usize,
+    chunk: Vec<WordTimestamp>,
+    style: &'a CaptionStyle,
+    style_name: String,
+}
+
+/// Chunks each `StylePiece`'s own word slice independently, with *that
+/// piece's own* `words_per_line` -- an override with a different
+/// `words_per_line` (or a different `style_mode` entirely) than the base
+/// genuinely changes how its portion of the transcript breaks into
+/// caption chunks, not just their color/font. A word belongs to whichever
+/// piece its own *start* time falls in (never split across two pieces),
+/// matching the same half-open-interval convention `plan_segments`/
+/// `shift_speakers` already use elsewhere in this codebase.
+fn build_chunk_timeline<'a>(words: &[WordTimestamp], pieces: &'a [StylePiece<'a>]) -> Vec<ChunkPiece<'a>> {
+    let mut out = Vec::new();
+    for (piece_index, piece) in pieces.iter().enumerate() {
+        let piece_words: Vec<WordTimestamp> =
+            words.iter().filter(|w| w.start >= piece.start && w.start < piece.end).cloned().collect();
+        if piece_words.is_empty() {
+            continue;
+        }
+        for chunk in group_words_into_phrases(&piece_words, piece.style.words_per_line) {
+            out.push(ChunkPiece { piece_index, chunk, style: piece.style, style_name: piece.name.clone() });
+        }
+    }
+    out
+}
+
 pub(crate) fn build_ass_document(
     words: &[WordTimestamp],
     style: &CaptionStyle,
     prosody: &[ProsodyWord],
     speakers: &[SpeakerSegment],
+    overrides: &[CaptionStyleOverride],
 ) -> Result<String, String> {
     let mut doc = String::new();
     doc.push_str("[Script Info]\n");
@@ -541,25 +637,61 @@ pub(crate) fn build_ass_document(
         style.background_opacity,
         style.shadow_size,
     )?);
+
+    let mut sorted_overrides = overrides.to_vec();
+    sorted_overrides.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    for (i, ov) in sorted_overrides.iter().enumerate() {
+        doc.push_str(&build_style_line(
+            &format!("Override{i}"),
+            &ov.style.font_family,
+            ov.style.font_size,
+            &ov.style.text_color,
+            &ov.style.outline_color,
+            &ov.style.position,
+            ov.style.bold,
+            ov.style.italic,
+            ov.style.letter_spacing,
+            &ov.style.background,
+            &ov.style.background_color,
+            ov.style.background_opacity,
+            ov.style.shadow_size,
+        )?);
+    }
     doc.push('\n');
 
     doc.push_str("[Events]\n");
     doc.push_str("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
 
-    let chunks = group_words_into_phrases(words, style.words_per_line);
-    for (i, chunk) in chunks.iter().enumerate() {
-        let (Some(first), Some(last)) = (chunk.first(), chunk.last()) else {
+    // Every override's own Style line is emitted unconditionally above,
+    // even if (per the filtering below) it ends up covering zero words --
+    // an unreferenced named Style is harmless to libass, not worth the
+    // extra bookkeeping to suppress.
+    let pieces = build_style_timeline(&sorted_overrides, style);
+    let chunk_pieces = build_chunk_timeline(words, &pieces);
+    for (i, cp) in chunk_pieces.iter().enumerate() {
+        let (Some(first), Some(last)) = (cp.chunk.first(), cp.chunk.last()) else {
             continue;
         };
         let start = ass_timestamp(first.start);
         let end = ass_timestamp(last.end);
-        let text = if style.style_mode == "cascade" {
-            let prev = if i > 0 { Some(chunks[i - 1].as_slice()) } else { None };
-            build_cascade_text(prev, chunk, style, prosody, speakers)?
+        let text = if cp.style.style_mode == "cascade" {
+            // "prev" only reaches back within this same style piece --
+            // never stitches the tail of one override onto the head of
+            // the next (or the base style's own head), since
+            // build_cascade_text renders `prev` using `cp.style`, which
+            // would misrender a `prev` chunk that actually belongs to a
+            // different piece.
+            let prev = if i > 0 && chunk_pieces[i - 1].piece_index == cp.piece_index {
+                Some(chunk_pieces[i - 1].chunk.as_slice())
+            } else {
+                None
+            };
+            build_cascade_text(prev, &cp.chunk, cp.style, prosody, speakers)?
         } else {
-            build_animated_text(chunk, &style.animation, &style.text_transform, &style.position)
+            build_animated_text(&cp.chunk, &cp.style.animation, &cp.style.text_transform, &cp.style.position)
         };
-        doc.push_str(&format!("Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"));
+        let style_name = &cp.style_name;
+        doc.push_str(&format!("Dialogue: 0,{start},{end},{style_name},,0,0,0,,{text}\n"));
     }
 
     Ok(doc)
@@ -723,6 +855,21 @@ mod tests {
     }
 
     #[test]
+    fn build_style_line_secondary_colour_differs_from_primary_so_karaoke_is_visible() {
+        // Regression test for a real bug: SecondaryColour used to equal
+        // PrimaryColour, so `\k` karaoke tags carried timing but produced
+        // no visible color sweep at all (confirmed via a real libass
+        // render — see KARAOKE_SECONDARY_COLOUR's doc comment). Style-line
+        // colour fields are positional: Name,Font,Size,Primary,Secondary,...
+        let line = build_style_line("Default", "Arial", 64, "#FFFFFF", "#000000", "bottom", false, false, 0.0, "none", "#FF0000", 50.0, 0.0)
+            .unwrap();
+        let fields: Vec<&str> = line.trim_end().trim_start_matches("Style: ").split(',').collect();
+        let (primary, secondary) = (fields[3], fields[4]);
+        assert_ne!(primary, secondary);
+        assert_eq!(secondary, KARAOKE_SECONDARY_COLOUR);
+    }
+
+    #[test]
     fn merge_punctuation_attaches_sentence_end_to_preceding_word() {
         let words = vec![word("hi", 0.0, 0.5), word(".", 0.5, 0.5), word("bye", 0.6, 1.0)];
         let merged = merge_punctuation(&words);
@@ -773,7 +920,7 @@ mod tests {
         ];
         let mut s = style("none");
         s.words_per_line = 4;
-        let doc = build_ass_document(&words, &s, &[], &[]).unwrap();
+        let doc = build_ass_document(&words, &s, &[], &[], &[]).unwrap();
         let dialogue_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Dialogue:")).collect();
         assert_eq!(dialogue_lines.len(), 2); // 4 words + 1 word = 2 chunks
         assert!(dialogue_lines[0].contains("one two three four"));
@@ -841,7 +988,7 @@ mod tests {
         let mut s = style("none");
         s.style_mode = "cascade".to_string();
         s.words_per_line = 2;
-        let doc = build_ass_document(&words, &s, &[], &[]).unwrap();
+        let doc = build_ass_document(&words, &s, &[], &[], &[]).unwrap();
         let dialogue_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Dialogue:")).collect();
         assert_eq!(dialogue_lines.len(), 2);
         assert!(!dialogue_lines[0].contains("\\N")); // first chunk: no previous line yet
@@ -853,7 +1000,63 @@ mod tests {
     fn build_ass_document_rejects_invalid_color() {
         let mut s = style("none");
         s.text_color = "bogus".to_string();
-        assert!(build_ass_document(&[word("hi", 0.0, 0.1)], &s, &[], &[]).is_err());
+        assert!(build_ass_document(&[word("hi", 0.0, 0.1)], &s, &[], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn build_ass_document_with_zero_overrides_is_byte_identical_to_no_overrides_param() {
+        // Regression guarantee for the overrides feature: an empty
+        // overrides list must produce exactly what this function always
+        // produced before overrides existed — one "Default" style, one
+        // global chunking pass.
+        let words = vec![word("one", 0.0, 0.2), word("two", 0.2, 0.4), word("three", 0.4, 0.6)];
+        let s = style("none");
+        let with_empty_overrides = build_ass_document(&words, &s, &[], &[], &[]).unwrap();
+        let dialogue_lines: Vec<&str> = with_empty_overrides.lines().filter(|l| l.starts_with("Dialogue:")).collect();
+        assert_eq!(dialogue_lines.len(), 1);
+        assert!(dialogue_lines[0].starts_with("Dialogue: 0,0:00:00.00,0:00:00.60,Default,"));
+        // Exactly one Style line -- no stray "OverrideN" line when there
+        // are no overrides to emit one for.
+        assert_eq!(with_empty_overrides.lines().filter(|l| l.starts_with("Style:")).count(), 1);
+    }
+
+    #[test]
+    fn build_ass_document_override_gets_its_own_style_and_chunking() {
+        // Base style: 4 words/line. Override (covering "three four"):
+        // a distinct style with 1 word/line -- proves both the separate
+        // Style line AND the range-aware re-chunking (an override with a
+        // different words_per_line genuinely changes how its portion
+        // breaks into chunks, not just its color/font).
+        let words = vec![
+            word("one", 0.0, 0.2),
+            word("two", 0.2, 0.4),
+            word("three", 0.4, 0.6),
+            word("four", 0.6, 0.8),
+            word("five", 0.8, 1.0),
+        ];
+        let base = style("none");
+        let mut override_style = style("none");
+        override_style.words_per_line = 1;
+        override_style.text_color = "#FF0000".to_string();
+        let overrides = vec![CaptionStyleOverride { start: 0.4, end: 0.8, style: override_style }];
+
+        let doc = build_ass_document(&words, &base, &[], &[], &overrides).unwrap();
+
+        // Two Style lines: Default (base) + Override0.
+        let style_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Style:")).collect();
+        assert_eq!(style_lines.len(), 2);
+        assert!(style_lines.iter().any(|l| l.starts_with("Style: Default,")));
+        assert!(style_lines.iter().any(|l| l.starts_with("Style: Override0,") && l.contains("&H0000FF")));
+
+        // "one two" (base, 4/line but only 2 words before the override
+        // starts) then "three" and "four" as their own 1-word chunks
+        // (override's words_per_line=1), then "five" back on Default.
+        let dialogue_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Dialogue:")).collect();
+        assert_eq!(dialogue_lines.len(), 4);
+        assert!(dialogue_lines[0].contains(",Default,") && dialogue_lines[0].contains("one two"));
+        assert!(dialogue_lines[1].contains(",Override0,") && dialogue_lines[1].contains("three"));
+        assert!(dialogue_lines[2].contains(",Override0,") && dialogue_lines[2].contains("four"));
+        assert!(dialogue_lines[3].contains(",Default,") && dialogue_lines[3].contains("five"));
     }
 }
 
@@ -866,8 +1069,10 @@ pub async fn burn_captions(
     output_path: String,
     prosody: Vec<ProsodyWord>,
     speakers: Vec<SpeakerSegment>,
+    overrides: Vec<CaptionStyleOverride>,
     voiceover_path: Option<String>,
     voiceover_offset_seconds: Option<f64>,
+    project_id: String,
 ) -> Result<String, String> {
     if words.is_empty() {
         return Err("Nothing to burn — run the transcription pipeline first.".to_string());
@@ -879,6 +1084,15 @@ pub async fn burn_captions(
     // Still valid with a voiceover active: this checks video_path's own
     // on-disk fingerprint, not which words are being burned.
     verify_transcript_is_fresh(&app, &video_path)?;
+
+    // Held for the whole burn, however many segments it ends up using --
+    // acquired once around this *outer* call, not per segment, since
+    // segments.rs already parallelizes internally within one burn (each
+    // segment competing separately for the same 2 encode permits would
+    // make one burn contend with itself). Gates the hardware encoder's
+    // driver-enforced concurrent-session cap (see concurrency.rs), not
+    // CPU/RAM the way the heavy-ML gate does.
+    let _permit = crate::concurrency::acquire_encode().await;
 
     let duration = probe_duration_seconds(&video_path).await;
     let segment_count = duration.map(recommended_segment_count).unwrap_or(1);
@@ -905,6 +1119,8 @@ pub async fn burn_captions(
                 segment_count,
                 &prosody,
                 &speakers,
+                &overrides,
+                &project_id,
             )
             .await;
             return result.map(|_| output_path);
@@ -912,7 +1128,7 @@ pub async fn burn_captions(
     }
 
     let ass_path = unique_temp_path("captions", "ass");
-    let ass_contents = build_ass_document(&words, &style, &prosody, &speakers)?;
+    let ass_contents = build_ass_document(&words, &style, &prosody, &speakers, &overrides)?;
     std::fs::write(&ass_path, ass_contents).map_err(|e| format!("Failed to write subtitle file: {e}"))?;
 
     let filter = format!(
@@ -958,7 +1174,7 @@ pub async fn burn_captions(
     }
     args.push(output_path.clone());
 
-    let result = run_with_progress(&app, "burn-progress", "burning", args, duration).await;
+    let result = run_with_progress(&app, "burn-progress", &project_id, "burning", args, duration).await;
 
     let _ = std::fs::remove_file(&ass_path);
     result?;
@@ -970,8 +1186,13 @@ pub async fn burn_captions(
 /// percentile bucketing), returns the result for the caller to hold onto
 /// and pass into `burn_captions`.
 #[tauri::command]
-pub async fn analyze_prosody(app: AppHandle, video_path: String, words: Vec<WordTimestamp>) -> Result<Vec<ProsodyWord>, String> {
-    let audio_path = crate::pipeline::extract_audio(&app, &video_path).await?;
+pub async fn analyze_prosody(
+    app: AppHandle,
+    video_path: String,
+    words: Vec<WordTimestamp>,
+    project_id: String,
+) -> Result<Vec<ProsodyWord>, String> {
+    let audio_path = crate::pipeline::extract_audio(&app, &video_path, &project_id).await?;
 
     let words_json_path = unique_temp_path("prosody-words", "json");
     let words_json =
@@ -983,6 +1204,7 @@ pub async fn analyze_prosody(app: AppHandle, video_path: String, words: Vec<Word
         "prosody.py",
         vec!["--audio".to_string(), cli_path(&audio_path), "--words".to_string(), cli_path(&words_json_path)],
         "prosody-progress",
+        &project_id,
         "analyzing_prosody",
     )
     .await;

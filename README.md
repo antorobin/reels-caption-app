@@ -310,6 +310,46 @@ milder issue (an occasional stray space inside a generated hashtag) gets
 cleaned up in Rust rather than trusted from the model — see
 `sanitize_hashtag` in the same file.
 
+**Grew into "content strategy" (multiple options, and a free-text hint
+input)** — requested directly: `generate_content_ideas` (one fixed
+title/description/hashtags result, transcript-only, no way to steer it)
+became `suggest_content_strategy` (3 distinct angle options — Educational/
+how-to, Entertainment/relatable, Aspirational/emotional, matching
+`music_gen.rs`'s own "name fixed categories explicitly" fix for the same
+small-model near-duplicate problem — plus an optional free-text `hints`
+field the creator can use to steer every option's topic, and a `language`
+parameter finally threaded through the same way `suggest_background_music`
+already had it). `hints` alone with an empty transcript is a real,
+supported input, not just a nice-to-have: it's what a video generated
+from scratch with no upload (section 10) seeds its content strategy from,
+since there's no transcript yet at that point.
+
+Verified directly against 4 real cases (English transcript alone,
+transcript+hints, hints alone, Tamil transcript alone) before shipping —
+two real, fixed issues and one real, unfixed limitation came out of that:
+an instruction locking the 3 options into a fixed output order was tried
+and dropped after real generations kept coming back in random order
+anyway regardless of the instruction (each option's own `angle` field is
+what actually identifies it now, nothing depends on array order); combining
+a transcript with hints occasionally produced duplicate hooks across
+options or literal placeholder-looking text in the `emoji` field instead
+of a real pictograph (a new `sanitize_emoji` in `content_ideas.rs`, next
+to the existing `sanitize_hashtag`, is the defensive backstop for the
+latter). The one real *unfixed* finding — a Tamil transcript with no hints
+can fabricate an entirely unrelated topic, confirmed across 3 separate
+test runs each inventing a different fictional topic — is documented
+honestly in the "Still open" list at the end of this file rather than
+silently shipped as if it always works; giving hints alongside Tamil
+content reliably anchors the topic even when transcript comprehension
+itself fails, so that's the practical mitigation for now.
+
+The per-language token budgeting this needs (the same 4096-token
+`llama-server` context ceiling and Tamil-vs-English tokenizer cost gap
+`suggest_background_music` already had to handle) was factored out of
+`music_gen.rs` into a new shared `llm_budget.rs`, rather than growing a
+second independent copy of those constants — see section 9.3's "Still
+open" list for why that duplication used to exist.
+
 ## 2.4. Install the media-ai env (optional, voice-over sync / vocal emphasis / speaker diarization)
 
 These three features share one conda env, `media-ai` — mediapipe (lip
@@ -529,6 +569,171 @@ temperature `content_ideas.rs`'s creative-generation call wants) — worth
 knowing if you touch either prompt: don't strip the few-shot examples back
 down to a bare instruction without re-verifying against real scripts.
 
+## 2.6.1. AI-generated background music, matched to the speech (Music ducking)
+
+"Music ducking" (`ducking.rs`/`DuckingPanel.jsx`, mixes a music bed under
+the video's own audio, automatically lowering it during speech using the
+transcript timing already on hand) used to only accept a music file the
+user already had. It can now generate one instead — a "✨ Suggest music"
+button sits next to the existing "Choose music file…" button in the same
+panel; both just set the same `musicPath` the duck-level slider and mixing
+step below already use, so nothing about the actual ducking changed.
+
+**Model: Meta's MusicGen-Small (`facebook/musicgen-small`)**, an official
+Hugging Face `transformers` model, text-conditioned, 300M params,
+CPU-capable. TinyMusician (a smaller/faster distillation of MusicGen) was
+looked at first — ruled out because it has no public checkpoint, pip
+package, or GitHub implementation as of this writing, only a September 2025
+arXiv paper (confirmed via web search, not assumed).
+
+**No new conda environment.** The existing `tts` env (section 2.6 above)
+already has `torch`+`transformers`+`scipy` for MMS-TTS — exactly what
+MusicGen needs too. Verified directly before writing any wiring code: this
+project's own `tts` env already had `transformers` 5.15.1, well past the
+4.31 minimum MusicGen needs, so not even a version bump was required.
+`facebook/musicgen-small` (~2.3GB) downloads on first use via
+`transformers`' own Hugging Face Hub cache, the same lazy-download pattern
+already relied on elsewhere in this app.
+
+**Suggest, then pick — not generate-and-apply.** The original version
+generated one bed from one LLM-written prompt and applied it immediately.
+Changed after direct feedback: "✨ Suggest music" now generates 3 different
+short (6s) preview clips via `suggest_background_music`, each playable
+inline before committing to anything; picking one calls
+`finalize_background_music`, which re-generates *only that one* prompt at
+the real target length (looped if the video's longer than
+`MAX_DIRECT_GENERATION_SECONDS`) and is what actually becomes the active
+bed. Auditioning cheap short previews before paying full generation cost
+for just the one that's actually wanted matters a lot here specifically
+because of how slow this model is on CPU (below) — generating 3 full-length
+candidates up front to throw 2 away would triple an already-expensive wait
+for nothing.
+
+**How the prompts are derived, and five iterations getting there:**
+`music_gen.rs`'s `derive_music_prompt_suggestions` reuses `llm.rs`'s local
+Qwen2.5-0.5B-Instruct service exactly like `content_ideas.rs` does for
+titles/hashtags — but getting 3 good, genuinely different, purely
+instrumental, culturally-aware suggestions out of a 0.5B model took five
+iterations (the first three fixing real bugs, the last two adding
+requested capability), each verified against the real model over HTTP
+before shipping, not assumed to work from the prompt text alone:
+1. A plain zero-shot instruction asking for an N-item JSON array made the
+   model echo fragments of its own instructions back as the "suggestions"
+   (`"purely instrumental"`, `"no vocals"`, `"no lyrics"`) — the same
+   small-model limitation already documented for `tts.rs`'s emotion
+   classifier, worse here since an array of genuinely distinct items is a
+   harder structural ask than single-label classification.
+2. One few-shot worked example (the fix that worked for the emotion
+   classifier) produced real, distinct-sounding prompts — but a second test
+   transcript (a memorial tribute) came back with a suggestion describing
+   "a soft, emotive vocal, like a lead singer," directly violating "no
+   vocals": a real functional bug, since that prompt handed to MusicGen
+   would push it toward generating something vocal-like instead of a
+   purely instrumental bed.
+3. Strengthening the no-vocals wording alone fixed the vocal leakage but
+   collapsed all 3 suggestions into near-duplicates of each other.
+   Explicitly naming three instrumentation *categories* to fill (one
+   acoustic/organic, one electronic/synth, one percussion/rhythm — see
+   `MUSIC_PROMPT_SYSTEM`) fixed both at once: verified across three
+   different-mood test transcripts (a DIY project, a memorial, a race
+   countdown) with zero vocal-word leakage and three structurally distinct
+   genres every time.
+4. Requested directly: factor in the spoken language's own film/popular
+   music culture too (Tamil cinema, English-language albums, etc), not just
+   content/mood. Added a `Language:` field alongside the transcript and a
+   third few-shot example (Tamil, leaning Carnatic/Kollywood-style
+   instrumentation) — verified against a real Tamil transcript from this
+   project's own earlier testing, and it correctly leaned South
+   Indian/Carnatic-style instrumentation from the language label alone.
+   Also found, by isolating it directly rather than guessing: a heavily
+   **code-switched** (Tamil+English mid-sentence) transcript can derail
+   this 0.5B model badly regardless of the language label — one real test
+   about cooking made it describe the recipe itself ("warm biryani,
+   comforting") instead of music entirely, while a plain-English
+   translation of the identical content only degraded mildly. This is a
+   real limitation of this specific lightweight local model's non-English/
+   code-switched comprehension, not something fixed here (would need a
+   translation step this app doesn't have) — documented honestly rather
+   than silently shipped as if it always works.
+5. Requested directly, again: go further than film/classical and name
+   *regional folk* styles too — e.g. Gana, rhythmic percussion-driven
+   street/folk music from North Chennai associated with working-class and
+   mass-appeal themes. Named it explicitly in the instruction and swapped
+   the Tamil example's percussion suggestion to demonstrate it. Verified
+   against two real Tamil transcripts, not just one: an energetic
+   working-class-story transcript correctly picked up Gana, while a calmer
+   devotional one still correctly favored Carnatic/Kollywood instead — it's
+   reading the content, not just parroting Gana regardless. One honest
+   caveat found in the same test: on a harder transcript, the model
+   occasionally mangled "Gana" into a garbled non-word ("Ghaannar-style")
+   — rough in the UI's displayed suggestion text, but the surrounding
+   descriptive words (percussion, rhythm, street music) still carry real
+   meaning for MusicGen's own generation, so it doesn't break the actual
+   audio the way the vocal-leakage bug did.
+
+Mood-matching for any one suggestion still isn't perfect at this model
+size — acceptable given the entire point of offering 3 auditioned options
+is letting a human pick the one that actually fits, not trusting one AI
+guess to nail it.
+
+**The full transcript goes into deriving the suggestions — but only the
+short result goes into MusicGen.** The LLM step sees the entire spoken
+transcript plus the detected language; the actual `generate_music.py` call
+never sees the transcript at all, only the short style sentence the LLM
+wrote (MusicGen's text encoder is built for short style captions, not
+conversational dialogue — feeding it a raw transcript would confuse it, not
+help it). One real gap this surfaced, asked about directly and then fixed
+rather than assumed away: `llm.rs` runs its local model with a 4096-token
+context, and that's a hard limit — confirmed directly by sending an
+oversized real request and getting back a plain HTTP 400
+(`"exceeds the available context size"`), not silent truncation.
+`content_ideas.rs` shares this same unbounded-transcript shape and would
+hit the identical wall on a long enough video. Measuring the real
+tokenizer (via `llama-server`'s own `/tokenize` endpoint) surfaced
+something worth knowing on its own: **Tamil script costs roughly 8.6
+tokens per word in this tokenizer, versus ~1.0 for English** — built
+around Latin/CJK text, it falls back to a much less efficient encoding for
+Tamil. That means a *moderate* Tamil video, not just an extreme-length one,
+can hit the context limit. Fixed with `transcript_text_for_prompt`: a
+transcript within a language-aware word budget goes through whole; a
+longer one is sampled from its beginning, middle, and end (40/20/40) rather
+than simply cut off at the end, so a style decision still reflects the
+whole video rather than just its intro. Verified end-to-end against a real
+1000-word simulated Tamil transcript (previously ~8,600 tokens on its own,
+comfortably over the limit): truncated to ~310 words, the real measured
+request came to 3,261 tokens, and generation succeeded.
+
+**Real CPU generation speed, measured directly, not assumed:** MusicGen-
+Small runs roughly **12x slower than real-time** on this project's own dev
+machine — a 20-second clip took ~4m12s wall-clock with the model already
+warm (no download in that run). That directly shaped
+`MAX_DIRECT_GENERATION_SECONDS` (15s, capping the worst case around 3
+minutes) — a longer video gets a 15s bed generated once and looped to fill
+the remaining length (`ffmpeg::loop_audio_to_duration`, a new
+`-stream_loop -1 -i bed -t <duration> -c copy` helper) rather than
+generating the full length directly. Known v1 trade-off: the loop point
+isn't crossfaded, so a hard seam can be audible on a short/percussive bed —
+not addressed yet. The UI's busy label says plainly that this is slow
+rather than showing a misleadingly generic spinner.
+
+**Audible live in the preview, not just after a real export.** A picked or
+finalized bed now plays directly alongside the loaded video in
+`VideoPreview.jsx`, ducked in real time — the same live-preview pattern
+section 2.6 already uses for a generated voiceover (a hidden `<audio>`
+element kept in lockstep with the `<video>` element's play/pause/seek
+events), extended here with a JS reimplementation of `ducking.rs`'s own
+duck-volume curve (`speechWindowsFromWords`/`duckVolumeAt` in
+`VideoPreview.jsx`, mirroring `speech_windows_from_words`/
+`build_ducking_volume_expr` constant-for-constant) evaluated fresh every
+frame instead of baked into an ffmpeg filter string. `musicPath`/`duckLevel`
+are lifted to `App.jsx` for this the same way `voiceoverPath`/
+`voiceoverOffset` already are. Verified the curve math directly (fed real
+sample timestamps through both the ramp-up and ramp-down edges before
+trusting it) rather than just eyeballing the numbers. Before this, "Music
+ducking" only ever wrote a separate merged output file — a real reported
+gap: after generating a bed, nothing made it audible until running "Add
+music with ducking" and opening the result.
+
 ## 2.7. Voice cloning: matching the generated voiceover to the original speaker
 
 Generating a voiceover from typed text ("write voiceover text" mode) doesn't just
@@ -655,6 +860,351 @@ source as female, the reference as male, and the cloned output as male too. Roun
 the cloned output back through this app's own English ASR (`parakeet_transcribe.py`):
 an exact word-for-word match of the original script, confirming intelligibility survives
 the conversion, same verification precedent as Piper's own plain output (section 2.6).
+
+## 2.8. Recording a voice-over by speaking (mic input + global-hotkey dictation)
+
+Two more ways to get a voice-over into a loaded video, alongside upload and
+generate-from-script (section 2.6):
+
+- **In-app**: VoiceoverSection's "Record from mic" mode — a push-to-talk
+  button using the standard `getUserMedia`/`MediaRecorder` Web APIs (no new
+  native audio dependency), converted to the same 16kHz mono WAV every
+  other audio path here expects via `mic_recording.rs` (shells out to the
+  already-bundled ffmpeg). Its own checkbox decides whether the recording
+  **replaces the video's audio** (goes through the same sync-to-mouth-
+  movement + re-transcribe flow as upload/generate) or **only updates the
+  captions**, leaving the video's own audio untouched — off by default, so
+  a recording never silently swaps the audio unless asked.
+- **Global hotkey, from anywhere in the OS**: `Ctrl+Shift+D` pops up a
+  small floating HUD (`dictation.rs` + `DictationHud.jsx`) — even with the
+  main window closed/tray-only. Speak, then press the hotkey again (or
+  Enter inside the HUD) to finish, or Escape to cancel. Text grows live in
+  the HUD itself while you talk — it uses the exact same live-dictation
+  backend as "Live dictation" below, not a separate record-then-batch
+  pass. This path always updates captions only (no voiceover-replace
+  option — that's a more deliberate action better suited to the in-app
+  checkbox than a fast global shortcut). If no video is loaded when it
+  finishes, the main window says so rather than silently discarding the
+  recording — the HUD itself has no way to know that; it's a separate
+  window.
+
+### Live dictation: text appearing as you speak (separate workflow, both by button and by global hotkey)
+
+A third, genuinely different path: **`LiveDictationPanel.jsx`** ("Live
+dictation (beta)", shown right below Voice-over) shows captions growing
+while you talk, instead of waiting for a full recording to finish. The
+`Ctrl+Shift+D` global hotkey documented above in this same section uses
+this exact same backend too, so both entry points behave identically.
+Deliberately kept separate
+from everything above — it never touches the video's audio, only the
+captions, via the same `onCaptionsFromRecording` callback.
+
+**How it actually works — and why, after two real iterations**:
+
+1. *First attempt*: a true incremental streaming recognizer
+   ([`sherpa-onnx`](https://github.com/k2-fsa/sherpa-onnx) + native mic
+   capture via [`cpal`](https://github.com/RustAudio/cpal)) — genuinely
+   smooth per-word live text, but English-only. Also hit a real build
+   issue along the way worth remembering: `sherpa-onnx`'s prebuilt Windows
+   *static* library is MSVC-built and can't link against this project's
+   GNU/MinGW toolchain at all (a `cargo build`/`tauri dev` failure `cargo
+   check` alone never catches, since it doesn't perform the actual link
+   step) — fixed at the time by switching to `sherpa-onnx`'s `shared`
+   (DLL) feature instead, since dynamic linking against a plain C API
+   turned out to be far more toolchain-portable than static-linking C++
+   object code.
+2. *Why it was replaced anyway*: no streaming-capable ASR model exists for
+   Tamil (or Tamil+English code-switching) today — confirmed via
+   [k2-fsa/sherpa-onnx's own project discussion](https://github.com/k2-fsa/sherpa-onnx/discussions/3199)
+   asking exactly this question. Since this app's whole point is
+   Tamil+English support, "smooth but English-only" wasn't the right
+   trade-off, so `sherpa-onnx` was dropped entirely.
+3. **What's actually running now**: `streaming_stt.rs` still captures
+   audio natively via `cpal` (that part of the brief — "use the OS's own
+   capability" — didn't need to change), and recognition reuses the
+   *exact same* segment → classify → route-to-Parakeet-or-Tamil-Whisper →
+   stitch logic `mixed_language.rs` already proves out for whole videos
+   (section 7.4) — `subdivide_long_segments`/`resolve_segment_languages`/
+   `merge_into_chunks` are shared directly (`pub(crate)`), not
+   reimplemented. Code-switching works here for free, because it's the
+   same code, not a second implementation.
+4. **A second real performance bug, found the same way (try it, watch it
+   fail, fix the actual cause)**: the first version of this called
+   `mixed_language::transcribe_with_language_detection` directly every
+   ~2.5s — which spawns a fresh Python process and reloads the whole ASR
+   model from disk *on every call*. That easily took far longer than the
+   2.5s interval itself, which is exactly why it didn't feel live at all.
+   Fixed with `stt/live_worker.py` (`LiveWorkerState` in `streaming_stt.rs`)
+   — one persistent Python process that loads the language-ID model,
+   Parakeet, and the Tamil checkpoint *once*, stays resident for the whole
+   app session (not just one dictation session — started lazily on first
+   use and reused after that), and serves repeated requests over a plain
+   stdin/stdout JSON-line protocol with no reload cost. Only the two
+   actual model-inference calls route through the worker; the Rust-side
+   segmentation/merge orchestration above is completely unchanged. The
+   main batch pipeline (`pipeline.rs`) still uses the one-shot scripts
+   directly and is untouched by any of this — it only pays the load cost
+   once per video anyway. Text still grows every ~2.5s, not instantly per
+   word (a full re-transcription of the growing buffer each cycle, not
+   incremental decoding) — that residual gap is inherent to the chunked
+   approach, not the model-reload bug this fixed.
+5. No separate model to download or bundle — this reuses whatever the
+   main transcription pipeline already has set up (the `stt` conda env,
+   plus the Tamil checkpoint if you want Tamil captions to work here too).
+
+**Also fixed while chasing the above**: two real bugs found through actual
+live testing, not hypothetical. A backend session left in memory could
+permanently block starting a new one (e.g. after a frontend-only reload
+that didn't restart the Rust process) — `start_live_dictation` now checks
+whether the stale session's capture thread has actually finished and
+self-heals instead of erroring. And `stop_live_dictation` used to *wait*
+for the final transcription pass before returning, which could leave the
+whole HUD frozen on "Finishing…" with nothing clickable if that pass was
+slow (or, rarely, stuck) — it now signals stop and returns immediately,
+with the real result arriving later via a `"live-dictation-final"` event;
+every phase of the HUD also now has an always-visible close button, so it
+can never get stuck again regardless of what the backend is doing.
+
+**Honesty check**: the streaming-recognizer build issue, the worker
+replacement, and both bugs above were all found/fixed via real `cargo
+build` runs and real testing, not assumed away — but real transcription
+quality and real code-switching behavior in this specific chunked setup
+still haven't been exercised end to end in the environment this was built
+in, for lack of a real mic there. Try it and report back what needs
+fixing.
+
+## 2.9. Semantic project search (cosine similarity / vector embeddings)
+
+The sidebar's project list search box ranks projects by actual meaning
+(title + description + hashtags + a transcript snippet), not just a
+substring match on the filename. Two real pieces, both verified directly
+against this project's exact setup before writing any application code:
+
+- **`sqlite-vec`** (a real SQLite virtual-table extension, `vec0`) does the
+  cosine-distance KNN ranking, embedded directly into the same `library.db`
+  the rest of the project library already uses — no separate vector
+  database. Confirmed with a standalone probe against this project's exact
+  `rusqlite` version (0.32): a real `vec0` table with
+  `distance_metric=cosine`, three test embeddings, and a KNN query that
+  correctly ranked two similar embeddings above a dissimilar one — real
+  ranking, not insertion order.
+- **`all-MiniLM-L6-v2`** (via `sentence-transformers`, in the existing
+  `tts` conda env — no new environment) turns text into a 384-dimension
+  embedding. Confirmed directly: two Kanyakumari-related sentences scored
+  0.62 cosine similarity against each other, versus 0.13 against an
+  unrelated chocolate-cake sentence — real semantic ranking, not a
+  coincidence of shared words.
+
+**Setup** (one more package in the already-existing `tts` env):
+
+```bash
+conda run -n tts pip install sentence-transformers
+```
+
+**Why a persistent local server, not a one-shot script per call**: every
+other Python integration in this app (`tts.rs`, `music_gen.rs`) spawns a
+fresh process per call, because those operations already take seconds to
+minutes — a fresh process's startup cost is noise. Embedding a query while
+someone is actively typing in a search box is different: loading
+`all-MiniLM-L6-v2` takes ~19s (measured directly), which is fine to pay
+*once* but not on every keystroke. `embeddings.rs` + `tts/embed_server.py`
+instead follow `llm.rs`'s llama-server pattern exactly — a small HTTP
+server (stdlib `http.server`, no new web-framework dependency) started
+once, lazily, on first use, kept running for the app's lifetime, on its own
+port (8735, separate from llama-server's 8734).
+
+Re-embedding a project (so search reflects its current title/description)
+happens automatically at a couple of natural checkpoints — after a fresh
+content-strategy generation, and ~8s after the last manual title/
+description/hashtag edit — not on every keystroke or every 1s autosave
+tick, the same "don't hammer the model server for no reason" reasoning as
+the debounce above.
+
+## 2.10. Caption theme library (bundled professional presets)
+
+`src/lib/themes.js` ships 37 named caption-style presets, grouped into 13
+categories (Bold & Punchy, Karaoke & Highlight, Cascade Spotlight, Minimal
+& Clean, Cinematic & Editorial, Energetic & Neon, Frosted & Soft, Boxed &
+Framed, Retro & Synthwave, Vibrant Colorful, Comic & Pop Art, Elegant &
+Script, Corporate & Lower-Third), selectable via a filterable card grid at
+the top of `CaptionStyleEditor.jsx` — picking one replaces the whole
+style; the granular controls below stay available to fine-tune
+afterward. Designed by researching the caption-style conventions used
+across popular short-form-video/captioning tools and commercial subtitle-
+template marketplaces, plus two open-source reference projects
+([remotion-captions-themes](https://github.com/vshukla7/remotion-captions-themes),
+[pycaps](https://github.com/francozanardi/pycaps)) and a general survey of
+Adobe Stock's and Envato Elements' subtitle-template catalogs, for
+named-style/archetype inspiration — no code, design, or asset from any of
+these was copied, only the general visual archetype (e.g. "synthwave
+neon," "comic-book burst," "elegant serif") each surfaced.
+
+Every theme is built entirely from `CaptionStyle` fields the ASS/libass
+burn pipeline (section intro above, `captions.rs`/`segments.rs`) already
+supports — no theme here relies on emoji, true gradient fills, real
+glow/blur, non-center alignment, or rounded box corners, none of which
+this renderer can currently do (see "Not attempted" below).
+
+**A real, verified bug was found and fixed as part of building this
+library**: `animation: "karaoke"` was silently invisible — `build_style_line`
+emitted the same ASS color for PrimaryColour and SecondaryColour, so
+`\k` tags carried only inert timing, no visible fill sweep (confirmed via
+a real ffmpeg+libass render: the burned frame was byte-identical before
+and after a word's `\k` duration elapsed). Fixed by giving SecondaryColour
+a fixed muted gray (`KARAOKE_SECONDARY_COLOUR`, matching the pre-word gray
+`"highlight"`'s animation already used) distinct from PrimaryColour — one
+constant, no `CaptionStyle` schema change. Every karaoke-based theme
+(Clean Classic, Golden Karaoke, Monoline Flow) gets a real, visible
+word-by-word reveal as a result.
+
+**4 new bundled display fonts**, added to `FONT_OPTIONS` alongside the
+existing system fonts, sourced from Google Fonts' OFL-licensed
+`google/fonts` repo (license files under `resources/fonts-license/`,
+matching Noto Sans Tamil's existing precedent in 2.5 above):
+- **Montserrat** (Bold) — bundled as a static instance, not the upstream
+  variable font: the variable file's own default named instance is
+  "Montserrat Thin", not "Montserrat" (confirmed via `fontTools`), which
+  would have made font-family matching by name unreliable. Pinned to
+  weight 700 via `fonttools varLib.instancer` (`updateFontNames=True`,
+  which correctly rewrites the name table to "Montserrat"/"Bold" for the
+  pinned instance) rather than shipping the ambiguous variable font.
+- **Bebas Neue**, **Anton** — single static weight each (both fonts only
+  ship one weight upstream).
+- **Poppins** — both Regular and Bold static weights bundled (themes use
+  both).
+- **Playfair Display** (Regular + Italic, variable-weight 400-900) — added
+  for the Elegant & Script category; unlike Montserrat above, its variable
+  font's own default instance already correctly declares "Playfair
+  Display"/"Regular" (confirmed via `fontTools`), so the raw upstream
+  variable files are bundled directly, no instancer-pinning needed.
+
+Same dual-path integration as Noto Sans Tamil: the `.ttf` files live in
+`src-tauri/resources/fonts/` for the ffmpeg/libass burn path (via
+`fonts_dir()`/`fontsdir`), and are mirrored into `src/assets/fonts/` with
+their own `@font-face` blocks in `styles.css` for the in-app WebView
+preview (the theme picker's live swatches, the style editor's own
+preview) — a separate rendering path from the burn output. Unlike Noto
+Sans Tamil, these are deliberately-selected display faces for specific
+themes, not general Unicode-fallback fonts, so each gets its own
+`@font-face` only and is not added to `:root`'s base font stack.
+
+**Verified for real** (not just assumed from the theme JSON): burned real
+test clips through the actual bundled `fontsdir`, for one theme per new
+font and one per new mechanic (Golden Karaoke's gold reveal after the
+fix; Grape Box's Poppins-on-purple-box cascade look; Beast Mode's Anton
++ heavy shadow; Bebas Trending's wide letter-spacing) — inspected the
+real rendered frames, not the generated ASS text.
+
+**Not attempted** (flagged, not silently skipped): emoji-in-caption
+rendering (a real gap in `captions.rs` — whether libass can even render
+color emoji through the `ass` filter with a bundled color-emoji font is
+unverified); true gradient text fill, true glow/blur, and true glitch/
+scanline/chromatic-fringing textures (not an ASS/libass capability in this
+pipeline — "Gaming Neon"/"Frosted Glass"/"Synthwave Neon"/"Retro Arcade"
+approximate those vibes with saturated color pairings, heavy shadow, and a
+low-opacity box instead, honestly, rather than claiming a literal VHS/neon
+effect); left/right horizontal alignment and combining cascade mode with
+karaoke/highlight animation simultaneously (existing architectural
+constraints, not needed by any theme in this set).
+
+**A second real bug was found and fixed while verifying theme switching
+actually showed up in playback**: `VideoPreview.jsx`'s live caption
+overlay never applied any animation at all — the theme picker's own
+preview cards animate (`classicPreviewAnimationClass`), but the main
+video preview just rendered static styled text regardless of a theme's
+`animation` field, making differently-animated themes look identical
+during real playback. Fixed with real per-chunk one-shot entrance
+animations (fade/pop/bounce/zoom/slide, timed to match the actual ASS
+burn durations, retriggered via a `key` on the active caption chunk) and
+genuine per-word rendering for karaoke/highlight (gray → theme color,
+switching at each word's real timestamp) and typewriter (per-character
+reveal) — using the real word-timing data already available, not an
+approximation. Caught a second bug while verifying *that* fix live: the
+per-word `<span>`s used `display: inline-block`, which silently collapsed
+the space between words in the rendered page (confirmed via a real DOM
+inspection — the text content correctly read "This ", but it rendered as
+"Thisisarealtest") — fixed by removing the unneeded `inline-block`.
+
+### Per-user default style, persisted in the database
+
+Any style change — picking a different theme card, or hand-tweaking a
+single field — is auto-saved (debounced ~1s) as the signed-in user's
+default caption style, in a new small `user_settings` key/value table in
+`library.db` (`library.rs`'s `get_default_caption_style`/
+`save_default_caption_style`/`reset_default_caption_style`), keyed by
+Firebase Auth's `user.uid` — deliberately per-user, not one global row,
+since a tweak made by one signed-in user on a shared machine shouldn't
+silently become another user's default. The next new project this user
+creates starts from that saved default instead of the hardcoded factory
+default (Cascade Bold); an already-open project's own already-loaded
+style is never retroactively swapped out from under the user.
+
+The style editor shows "Current: `<Theme Name>`" when the live style
+still exactly matches a stock preset, or "Current: `<Theme Name>
+(Custom)`" the moment anything has been hand-tweaked away from it —
+computed fresh every render by comparing the current style against
+`captionThemeId` (a new project-slice field, set only when a theme *card*
+is clicked, never on a granular tweak) — deliberately not a separately
+stored flag, so the label can never drift out of sync with the actual
+style values. "Reset to factory default" reverts the currently open
+project back to Cascade Bold immediately and clears the saved default
+server-side, so future new projects also go back to the factory default.
+
+## 2.11. Per-portion caption style overrides
+
+Beyond one whole-video `CaptionStyle`, a project can have any number of
+non-overlapping time-range overrides — e.g. a cold open in "Beast Mode,"
+the rest in "Clean Classic" — layered on top of the base style. Two ways
+to start one, both opening the same panel: **drag directly on the
+Timeline's waveform** (a plain click still just seeks, unchanged — a
+small pixel-movement threshold tells the two apart; the dragged range
+snaps to the nearest word boundary), or click **"+ Add a style override
+for this portion"** below the Timeline, which defaults to a 3-second
+window starting at the current playhead position. Either way, both
+entry points only ever produce an *approximate* range, so the resulting
+`CaptionOverridePanel` shows the start/end as real editable number
+inputs (seconds), not a read-only label — reuses `CaptionStyleEditor`
+wholesale (full theme grid, category filter, every fine-tuning control)
+seeded from the project's *current* base style, plus the same
+overlap-check/Apply/Cancel either way. Existing overrides render as
+bands on the Timeline and list in `MoreOptionsModal`'s style tab with a
+Remove button each.
+
+**The core mechanism — a range-aware style timeline**, implemented twice
+in lockstep (once in `captions.rs`, used by both burn paths; once in
+`src/lib/captions.js`, used by the live preview, so it can never show a
+different chunk boundary or style than what actually burns): sort
+overrides by `start`; walk them, filling every gap (before/between/after)
+with the base style, each override becoming its own named piece. Each
+piece's own word slice is then chunked *independently* with that piece's
+own `words_per_line` — an override changing `words_per_line` or
+`style_mode` (cascade vs. classic) genuinely changes how its portion
+breaks into caption chunks, not just its color/font, which is what "apply
+a different theme" actually has to mean. With zero overrides this reduces
+to exactly the single global chunking pass this pipeline always did —
+verified with an explicit regression test, not just assumed.
+
+Non-overlap is enforced by the UI at creation time (`overrideRangeOverlaps`
+in `src/lib/captions.js`, checked by `CaptionOverridePanel`'s Apply
+button) — the style-timeline resolution itself never has to arbitrate a
+tie between two overrides covering the same instant.
+
+**Segmented (long-video, ≥ ~40s) burns**: each parallel-encoded segment
+already calls `build_ass_document` independently with its own
+already-rebased word list; `segments.rs` gained `shift_overrides` —
+mirroring the existing `shift_speakers`'s overlap-filter-then-clip shape
+(not `shift_prosody`'s simpler start-only filter), since an override, like
+a diarization speaker segment, is a *range* that can straddle a segment
+cut point chosen by `snap_to_gap` and must be clipped into every segment
+it actually overlaps, never dropped or duplicated in full. Verified with
+a real burn deliberately straddling a segment boundary.
+
+**Verified for real**: burned a real test clip with three `Dialogue:`
+lines referencing two different named ASS styles (matching
+`build_ass_document`'s exact new output shape) and inspected the actual
+rendered frames before, during, and after the override — confirmed
+libass genuinely switches styles mid-video and reverts correctly, not
+just assumed from the generated ASS text.
 
 ## 3. Install project dependencies
 
@@ -1520,6 +2070,146 @@ finishes, same as before.
 
 ---
 
+## 9.3. Persistent media library (local storage, project list)
+
+Every imported video used to just be referenced at whatever OS path the
+file dialog returned — never copied anywhere — and a burned/exported
+output went wherever a save dialog pointed. Nothing survived switching to
+a different video: no history, no way to return to a past project, no
+guaranteed place either file actually lived. `library.rs` fixes that:
+importing a video copies it into `app_data_dir()/media/<project_id>/original.<ext>`,
+Burn & Export always writes into that same project's own
+`media/<project_id>/processed/` subfolder, and a **local SQLite database**
+(`library.db`, `rusqlite` with the `bundled` feature) tracks every project
+— title, description, hashtags, filename, timestamps, and everything else
+needed to fully resume editing.
+
+**Local SQLite, not the flat-JSON-file pattern used elsewhere in this app**
+(`scheduler.rs`, `instagram.rs`) — deliberately, since a later phase adds
+local semantic (vector/cosine) search over this same data, something a
+flat JSON file has no path to at all. Verified directly before writing any
+code around it: `rusqlite`'s `bundled` feature (SQLite's own C source
+compiled straight into this binary) builds cleanly under this project's
+MinGW/GNU toolchain — the same toolchain that made sherpa-onnx's
+MSVC-only prebuilt library a real, confirmed build blocker earlier in this
+project's history (see the live-dictation section above), so this got
+checked with a real `cargo build` up front rather than assumed to just
+work.
+
+**The `projects` table stays deliberately thin.** Only what the project
+*list* itself needs (id, paths, title/description/hashtags, timestamps)
+gets a real column; everything else a full editing session needs to
+restore (transcript words, caption style, prosody, speakers,
+voiceover/music state, detected language, generated content ideas) is one
+opaque `state` JSON text column — Rust never needs to understand that
+shape, only the frontend does. This is deliberate, not laziness:
+`CaptionStyle` (`captions.rs`) is `Deserialize`-only, no `Serialize` — an
+opaque blob sidesteps needing that (and three other structs) to grow a
+second Rust-side mirror that has to stay in lockstep with the JS shape
+forever.
+
+**Burn & Export dropped its "Save As" dialog.** It now always writes into
+the project's own `processed/` folder via a new `processed_output_path`
+command — `burn_captions` itself needed zero changes; the frontend just
+calls this in place of the old `save()` dialog and passes the result
+through as the same `output_path` argument it always took. A "Reveal in
+folder" link (wrapping `tauri_plugin_opener::reveal_item_in_dir`, already a
+dependency) appears next to the burn status, since there's no dialog
+anymore to show *where* the file went.
+
+**Loading a project from the sidebar list never re-runs transcription.**
+`App.jsx`'s `applyProjectState` is the one function both "just imported a
+brand-new video" and "clicked an existing project" go through — the
+difference is only whether `runPipelineFor` gets called afterward. An
+autosave effect (plain debounced `setTimeout`, ~1s) keeps the currently-open
+project's row up to date as you edit, with no explicit "Save" action
+anywhere, matching this app's existing "no separate save step" philosophy.
+
+**The sidebar list sorts by `created_at`, never `updated_at`** — sorting by
+last-edited would make the project you're actively working on jump to the
+top of its own list on every autosave tick, which is disorienting.
+"Latest first" means newest *import*.
+
+**A real, pre-existing bug this work surfaced, not caused**: `cargo test`
+for this whole crate crashes with `STATUS_ENTRYPOINT_NOT_FOUND` before
+running a single test — confirmed directly to predate this feature by
+stashing every change from this whole session (including before
+`library.rs`/`rusqlite` existed) and re-running it on that clean baseline,
+where it crashed identically. This means `captions.rs`'s own 58-test suite
+currently can't run via `cargo test` in this environment either, for
+reasons unrelated to anything built here. `library.rs`'s own SQL logic
+(schema, insert, list-ordering, update, delete, JSON round-tripping
+including real Tamil UTF-8 text) was instead verified against a real
+`rusqlite` connection via a standalone `cargo run` binary outside this
+crate — sidesteps the broken test harness rather than being blocked by it.
+Fixing the harness itself is out of scope here; `#[cfg(test)]` tests were
+still added to `library.rs` (same convention as `captions.rs`) for
+whenever it's fixed.
+
+**Title/description/hashtags now auto-fill in the background**, requested
+directly, rather than only on a manual "Generate" click — `runPipelineFor`
+fires `generateContentIdeas` the moment a fresh transcript comes back
+non-empty (a silent/no-audio video generates nothing, since there's
+nothing to summarize), with a "✨ Generating…" hint in the sidebar while it
+runs. The existing "only fill in while the title still reads as the
+placeholder" guard is what keeps this from ever overwriting a title
+someone's already started typing, even if generation is still running
+when they do.
+
+**The AI-generated description used to come back as most of the
+transcript, lightly reworded — not a summary.** Confirmed directly against
+the real local model, not just suspected: a genuine 138-word transcript (in
+the actual unpunctuated shape real ASR output has, not a hand-punctuated
+paragraph) produced a 128-word "description," essentially the whole thing.
+Fixed two ways, verified together — neither alone was enough: (1)
+stronger, more explicit wording telling the model never to copy or
+paraphrase the transcript, just summarize the general topic — this alone
+still let real generations run long; (2) a generous `maxLength` on the
+JSON schema as a backstop — but verified directly that relying on *this*
+alone just cuts generations off mid-sentence once they hit the cap (e.g.
+"...even sending alerts when"), a real regression of its own. The actual
+fix is `trim_to_sentence` (`content_ideas.rs`): applied after generation,
+it trims to the last *complete* sentence within a tighter target length,
+falling back to a word-boundary cut with a trailing "…" only when there's
+no sentence-ending punctuation at all within budget (real transcripts
+often have none). Verified end-to-end on two different real transcripts
+(a DIY project, a memorial tribute): descriptions landed at 24-27 words,
+complete and on-topic, regardless of the source transcript being anywhere
+from 58 to 138 words.
+
+**Burn & Export is now labeled "Save"** (`BurnExportButton.jsx`) — asked
+for directly, since it's genuinely the app's save/checkpoint action: it
+writes the current transcript/style/etc. as a burned video *and* now also
+saves the project's full state immediately afterward (`App.jsx`'s
+`burnCaptions`, via a new shared `currentProjectPayload` helper), not just
+relying on the debounced autosave to eventually catch up — so reopening a
+project later reliably resumes from at least that checkpoint even if the
+app closed within the debounce's 1-second window. The underlying
+command/prop names (`burnCaptions`, `burning`, ...) stay as they are; only
+the button's label and icon changed, since they describe the actual
+mechanism (burning captions into a new file), not what the button is
+called.
+
+**A way to view/play the untouched original video for reference**, also
+requested directly — a "▶ View original video" toggle in the sidebar plays
+`originalVideoPath` inline (a new piece of state, set once per project and
+never mutated afterward). This matters because the *main* preview's own
+video can silently stop being the original: a jump-cut re-points
+`videoPath` at a genuinely different (silence-removed) file, and its audio
+track mutes once a voiceover is active — neither of those touch
+`originalVideoPath`, so the real original is always one click away
+regardless of what the main preview currently shows.
+
+**Not yet built** (see the plan this was scoped from): local semantic/
+vector search over the library (via the `sqlite-vec` SQLite extension +
+locally-generated embeddings — no cloud embedding API), and Cloudflare R2
+overflow for older projects' video files once the library grows past
+roughly the newest 50 (chosen over AWS S3 specifically for R2's permanent
+free tier with zero egress fees — real cost research, not assumed, since
+"stream/play" from cloud means egress is the cost that actually matters).
+
+---
+
 ## 10. Suggested next build steps
 
 Done in this scaffold:
@@ -1547,12 +2237,23 @@ Done in this scaffold:
 - ~~Actually publish a finished video to Instagram, and let it be scheduled (one-off or recurring) instead of only connecting an account.~~ — new `media_host.rs` (temporary local file server + on-demand `cloudflared` quick tunnel, since Instagram fetches video from a public URL rather than accepting a direct upload) and `scheduler.rs` (persisted daily/weekly/once schedules, a 60-second background tick that runs even with the window closed, native notifications on each attempt), plus `instagram.rs`'s `publish_reel` (container → poll → publish). New **Schedule to Instagram** button (`ScheduleToInstagramButton.jsx`) next to Burn & Export. See section 9.1's "Posting and scheduling."
 - ~~Automatically refresh the connected Instagram account's token instead of requiring a manual reconnect every ~60 days.~~ — `instagram.rs`'s `refresh_instagram_token_if_needed`, checked every scheduler tick: extends the long-lived user token (and re-derives a fresh Page access token) via the same `fb_exchange_token` grant used for the initial exchange, once within 5 days of expiring. Needed persisting the raw long-lived user token (`IgAccount.user_access_token`, previously discarded right after deriving the Page token) — an account connected before this only refreshes after one manual reconnect.
 - ~~Over-the-air updates, hosted economically instead of standing up a new backend.~~ — `tauri-plugin-updater` + `tauri-plugin-process`, checking a static `latest.json` manifest hosted as a GitHub Release asset (same free hosting this project already uses for the MSI/model downloads) rather than Firebase Hosting, whose free-tier bandwidth is a real constraint for installer-sized files. Every update is signed (a keypair generated via `tauri signer generate`; the public half ships in `tauri.conf.json`, the private half never leaves the release-building machine) and verified before installing. `UpdateBanner.jsx` checks silently on launch; Settings → Updates checks on demand. See section 9.2 — cutting an actual signed release is still a manual, undocumented-until-now process (no CI release pipeline exists yet), now written up there.
+- ~~A push-button way to record a voice-over from the mic (for captions, optionally merged in as the video's actual audio) — plus a global hotkey for it, since the app already lives in the system tray.~~ — `mic_recording.rs` (browser `MediaRecorder` capture, converted to WAV via the already-bundled ffmpeg) feeding the existing voiceover/transcription pipeline; VoiceoverSection.jsx's new "Record from mic" mode (its own checkbox for caption-only vs. replace-the-audio); `dictation.rs` + `DictationHud.jsx` for the `Ctrl+Shift+D` global-hotkey floating HUD, reachable even with the main window closed. See section 2.8.
+- ~~Make the text actually appear as you speak, not just after recording stops — as a unique, lightweight, separate workflow, capable of Tamil+English code-switching too.~~ — `streaming_stt.rs`: `cpal` for native OS mic capture, feeding a periodic (~2.5s) re-transcription through the exact same `mixed_language.rs` code-switching pipeline a whole video already uses, instead of a from-scratch streaming implementation. Both `LiveDictationPanel.jsx` (in-app) and the `Ctrl+Shift+D` global-hotkey HUD (`dictation.rs`/`DictationHud.jsx`) use this same backend now. First attempt used `sherpa-onnx` for true incremental streaming (smooth per-word text, but English-only, and hit a real MSVC-vs-GNU-MinGW linking build failure along the way, fixed by switching to its `shared`/DLL feature) — replaced once it became clear no streaming-capable model exists for Tamil, confirmed via k2-fsa's own project discussion. Real on-device testing then surfaced several more bugs, each fixed the same way (try it, watch it fail, fix the actual cause): (1) it didn't actually feel live — root cause was each ~2.5s cycle spawning a brand-new Python process and reloading every model from scratch, fixed by replacing that with `stt/live_worker.py`, a single persistent Python process (loaded once, kept alive for the whole session) served over a newline-delimited JSON stdin/stdout protocol (`LiveWorkerState`/`ensure_live_worker` in `streaming_stt.rs`) — verified directly against the real conda env outside the app (a standalone probe script feeding it real synthesized speech), not just by re-reading the code: cold model load is a real, one-time ~20-25s cost, and every request/response after that round-trips correctly; (2) the HUD's close button called the window-close API directly, which the `dictation-hud` capability didn't actually grant permission for (`core:default` doesn't include it) — it silently did nothing, and worse, since it bypassed `stop_live_dictation` entirely, it left the previous session's mic stream running forever; (3) `<React.StrictMode>` in `dictation-hud-main.jsx` double-invokes the HUD's mount effect in dev, which fired `start_live_dictation` twice in a race and made even a *first, fresh* hotkey press fail with "a session is already running" — fixed by dropping StrictMode for that one entry point, since its mount effect starts a real non-idempotent backend session (a mic-capture thread and a worker process), not the kind of effect StrictMode's double-invoke is meant to protect; (4) starting a new session while a previous one was still (or stuck) running used to simply refuse with that same "already running" error — changed to force-end whatever was there instead (signal its stop flag, wait for its capture thread to actually release the microphone, abort its transcription task) before opening a new one, since a `cpal` input stream left open by a stale session could keep a *new* one from ever capturing real audio at all, which looks exactly like "live dictation never shows any text" rather than like a session conflict; (5) the HUD could hang forever on "Finishing…" with nothing clickable, because `stop_live_dictation` used to block until the final transcription pass completed — fixed by making it signal-and-return immediately (the real result arrives later via the existing `live-dictation-final` event) and giving every HUD phase an always-visible close button that now actually works. Also added a `live-dictation-worker-status` event so the UI shows "Loading speech models (first time only)…" during that one-time cold-start cost instead of silently showing nothing, which had looked indistinguishable from "broken." See section 2.8's "Live dictation."
+- ~~Fix the live preview playing both the original video's audio and a new mic-recorded voice-over at once, even with "replace its audio" checked.~~ — the burned/exported file was always correct (`captions.rs`'s `-map 1:a` genuinely drops the original track); only `VideoPreview.jsx`'s *live* preview was affected. `videoRef.current.muted = true` was already being set imperatively once a voiceover went active, but nothing kept it that way afterward — the `<video>` element still has `controls` (for scrubbing/fullscreen), and its native player chrome has its own volume/mute button that can flip `.muted` back to `false` completely outside React, playing the original audio back alongside the voiceover. Fixed with an `onVolumeChange` handler that re-asserts `muted = true` any time it fires while a voiceover is active, which covers every route back to unmuted (the native button, a dragged volume slider, an OS media key), not just the one that was actually hit.
+- ~~Clean up a "Record from mic" take: cut the dead air at the start, and make the speech itself sound clearer.~~ — `mic_recording.rs`'s `save_recorded_voice` now runs one combined ffmpeg filter chain (`highpass` for rumble, `afftdn` for noise, `silenceremove` for leading silence only, single-pass `loudnorm` for clarity/level) instead of a bare format conversion. Verified directly against a real synthesized-speech clip with 2s of silence prepended, not just by reading ffmpeg's docs: the trimmed/cleaned output still transcribed word-for-word with nothing clipped off the start, and forcing `-ar 16000 -ac 1` on the *output* was necessary because `loudnorm` resamples internally (confirmed directly: an unconstrained pass on 16kHz input came out at 192kHz, which would have quietly broken the "16kHz mono WAV" contract every other audio path in this app relies on).
+- ~~Fix a genuinely-Tamil mic recording coming back with an empty transcript and "Detected language: English."~~ — root-caused against the actual real recording that triggered it (kept in temp from the bug report, not reconstructed): `pipeline.rs`'s `transcribe_audio_file` (every voiceover/mic-recording path routes through this) was reusing `mixed_language.rs`'s video-oriented language detector, which chops audio on every natural pause (~0.5s+) and classifies each resulting sliver (often 1-4s) independently. On this real ~53s recording that produced wildly inconsistent per-sliver guesses across half a dozen unrelated languages, and by pure chance the only two slivers that crossed the confidence bar both said "English" — which then forward/backward-filled across the *entire* recording, silently routing genuinely Tamil audio through the English-only transcriber. Forcing the same file through the Tamil transcriber directly proved the audio itself was fine all along: a full, coherent 37-word Tamil transcript came right out. Fixed with a new `transcribe_solo_recording_with_language_detection` (`mixed_language.rs`) specifically for this single-speaker-single-take case (a voiceover recording, unlike a full video, never has a genuine within-clip language switch to catch): classify a handful of large (~20s) windows across the clip and majority-vote the supported-language guesses, instead of dozens of tiny, easily-wrong ones. Verified directly on the same real recording: three large windows never once said "English" (the two that missed Tamil said Telugu/Malayalam instead — still wrong individually, but neither is a *supported* language here, so neither could hijack the vote), and the majority-vote result came back Tamil. A second real recording then hit the case where *every* window missed Tamil entirely (both said Telugu) — surfaced correctly as "Detected spoken language 'te' isn't supported yet" rather than silently mistranscribing, but genuinely still Tamil underneath. Added one narrow, evidence-based fallback for exactly this: whisper-tiny's language-ID has no special training to tell South Dravidian languages apart (Tamil/Telugu/Malayalam/Kannada share enough acoustic structure to confuse a small general-purpose model despite having entirely different scripts) — confirmed on both real recordings, whose wrong guesses were consistently Telugu/Malayalam, never an unrelated language family. Since Tamil is the only Dravidian language this app can transcribe, seeing Telugu/Malayalam/Kannada among the guesses (with no supported-language vote at all) now resolves to Tamil instead of erroring; an unrelated wrong guess (French, Mandarin, ...) still hits the real "unsupported language" error, since forcing genuinely different phonetics through the Tamil-specific fine-tune would produce confident-looking wrong-script nonsense, not real text — this is deliberately not a general "guess the nearest supported language" policy.
+- ~~AI-generated background music, matched to the speech, instead of only ducking a music file the user already had.~~ — new `music_gen.rs` + a "✨ Suggest music" button in the existing `DuckingPanel.jsx` (sets the same `musicPath` state the upload flow already drives, so the duck-level slider and mixing step needed zero changes). Meta's MusicGen-Small (`facebook/musicgen-small`, official `transformers` model) — TinyMusician was considered first but ruled out, confirmed via web search to have no public checkpoint/package/repo, just a Sept 2025 arXiv paper. Runs in the *existing* `tts` conda env (already had `torch`+`transformers`+`scipy` for MMS-TTS) rather than a new one — verified directly that its installed `transformers` (5.15.1) already supported `MusicgenForConditionalGeneration` before writing any wiring code. Real, measured (not assumed) CPU generation speed shaped the design: ~12x slower than real-time on this dev machine (a 20s clip took ~4m12s warm, no download) — reworked, after direct feedback, from a single generate-and-apply button into suggest-then-pick: 3 short (6s) preview clips generate up front and play inline, and only the one actually chosen gets re-generated at full length (looped via `ffmpeg::loop_audio_to_duration` past 15s) and applied — auditioning cheap previews before paying full cost for just the winner, rather than generating (and mostly discarding) 3 full-length beds. Getting the LLM to write 3 good, purely-instrumental, genuinely-different, culturally-aware suggestions from a 0.5B model took five verified-against-the-real-model iterations: a plain instruction made it echo its own wording back as "suggestions"; one few-shot example fixed that but let a suggestion slip in "a soft, emotive vocal, like a lead singer" (a real bug — that phrase would push MusicGen toward vocals, not an instrumental bed); naming three explicit instrumentation categories (acoustic/electronic/percussion) fixed both the vocal leakage and a diversity collapse the stronger wording alone had caused; a `Language:` field plus a Tamil few-shot example got it correctly leaning Carnatic/Kollywood-style instrumentation for Tamil content (also surfaced a real limitation: heavily code-switched Tamil+English transcripts can derail this small model into describing the transcript's *content* instead of music, e.g. describing a recipe's ingredients — no fix shipped for that, documented instead); naming *regional folk* styles too (Gana, Chennai's rhythmic street/folk genre) got it correctly picked up for an energetic working-class-themed Tamil transcript while a calmer Tamil transcript still correctly favored Carnatic — verified it reads content, not just language, before trusting it. Asked directly whether the full context actually feeds the suggestion step: yes, the LLM sees the whole transcript (MusicGen itself only ever gets the short resulting style sentence, deliberately — its text encoder is built for short captions, not transcripts) — but that surfaced a real, previously-unbounded-transcript bug shared with `content_ideas.rs`: `llama-server`'s 4096-token context is a hard limit (confirmed directly — an oversized request gets a plain HTTP 400, not silent truncation), and measuring its real tokenizer found Tamil script costs ~8.6 tokens/word versus English's ~1.0, so a *moderate* Tamil video, not just an extreme one, could hit it. Fixed with `transcript_text_for_prompt` (language-aware word budget; a longer transcript samples its beginning/middle/end rather than just its intro) — verified end-to-end against a real 1000-word simulated Tamil transcript that previously would have needed ~8,600 tokens on its own: truncated it to ~310 words, the real request measured 3,261 tokens, and generation succeeded. Also now plays live in the preview, ducked in real time (a JS reimplementation of `ducking.rs`'s own duck-curve math, verified against real sample timestamps) — previously a bed was only ever audible after actually exporting via "Add music with ducking." See section 2.6.1.
+
+- ~~Persist every uploaded original video and every burned/exported video into real local storage, keep a searchable, paginated, newest-first project list, and reload full editing state on click.~~ — new `library.rs`: a local SQLite database (`rusqlite`, `bundled` feature — verified directly to build cleanly under this project's MinGW/GNU toolchain before writing anything around it) tracks one row per imported video, which gets copied into `app_data_dir()/media/<id>/original.<ext>` the moment it's picked (never left at the OS path the file dialog returned). Burn & Export dropped its "Save As" dialog entirely — output now always lands in that same project's `media/<id>/processed/` folder via a new `processed_output_path` command, with `burn_captions` itself completely unchanged (the frontend just calls this instead of `save()` and passes the result through as the same `output_path` argument). `Sidebar.jsx` is now the real project list (title/description/hashtags/filename per row, click-to-load, delete, client-side pagination, sorted by `created_at` — deliberately not `updated_at`, which would make the project you're actively editing jump to the top of its own list on every autosave tick). A debounced (~1s) autosave effect in `App.jsx` keeps the open project's row current with no explicit "Save" button, matching this app's existing "no separate save step" philosophy; `applyProjectState` is the one function both "just imported a video" and "clicked an existing project" go through, and only the former also triggers transcription. The project's title/description/hashtags stay separate from (but seed once from) the existing AI-generated `contentIdeas` — requested directly: rather than only filling in on a manual "Generate" click, `runPipelineFor` now fires `generateContentIdeas` in the background the moment a fresh transcript comes back non-empty (a silent/no-audio video generates nothing, since there's no transcript to work from), so a title/description/hashtags are usually already waiting by the time you look at the sidebar. The existing "only fill in while the title still reads as the placeholder" guard is what keeps this from ever clobbering a title you've already started editing, even if generation is still running in the background when you start typing. Surfaced a real, pre-existing, unrelated bug while verifying: `cargo test` for this whole crate crashes with `STATUS_ENTRYPOINT_NOT_FOUND` before running a single test — confirmed directly by stashing every change from this entire session (including before this feature existed) and reproducing the identical crash on that clean baseline, meaning `captions.rs`'s own 58-test suite has been silently unrunnable via `cargo test` in this environment regardless of this work. Verified `library.rs`'s actual SQL logic (schema, insert, newest-first ordering, update, delete, JSON round-tripping including real Tamil UTF-8 text through the opaque `state` column) a different way instead — a standalone `cargo run` binary outside this crate, sidestepping the broken harness — all 11 real checks passed; `#[cfg(test)]` tests were still added to `library.rs` for whenever that harness gets fixed. See section 9.3. **Not yet built** (from the same plan): local vector/cosine search over the library (`sqlite-vec`, fully offline, no cloud embedding cost) and Cloudflare R2 overflow for older projects once the library grows past ~50 (R2 chosen over S3 after real research — a permanent free tier with zero egress fees, which is what actually matters for "stream/play," versus S3's smaller permanent allowance and time-limited transfer credit).
 
 Still open:
 1. Live preview doesn't yet replicate every *burn animation* (karaoke fill, pop, bounce, typewriter, per-word highlight, slide, zoom, fade) — `VideoPreview.jsx` already shows real captions, live, correctly positioned and timed over the actual video frame (not a static style swatch), and cascade mode's per-word size/color pop is matched exactly, but classic mode's `animation` setting only affects the final burned output today; the live preview shows plain styled text for all of them.
 2. A path to bundling the `stt`/`tts`/`media-ai`/`voice-clone` conda *environments* themselves for zero end-user setup — see section 8.1's regression note. This is now a narrower gap than it used to be: `npm run fetch-resources` (developers) and the in-app "Download now" banner (installed end users, section 6.1) already handle every large model *file*, including the two that used to require a manual per-machine setup (Tamil transcription, voice cloning). What's left is specifically the Python packages/environments (torch, transformers, faster-whisper, openvoice, mediapipe, librosa, ...) — `conda-pack` is worth revisiting now that `stt`'s own dependency surface is lighter than it used to be.
 3. More Indian languages in `stt::INDIC_LANGUAGES`/`tts::TTS_INDIC_LANGUAGES` beyond Tamil — see `resources/stt-models/README.md`. Extending the auto-detection language list (section 7) is the same piece of work now that language selection is automatic rather than a dropdown.
 4. The local media server (`media_host.rs`) always returns the whole video file and ignores `Range` request headers — untested against a video large/slow enough for Instagram's fetcher to actually need partial/resumable requests.
+5. AI music suggestions degrade on a heavily code-switched (Tamil+English mid-sentence) transcript — confirmed directly, not hypothesized, see `MUSIC_PROMPT_SYSTEM`'s doc comment in `music_gen.rs`. Qwen2.5-0.5B-Instruct's non-English/code-switched comprehension just isn't strong enough at this size; a real fix would need a translation-to-English step before deriving suggestions, which this app doesn't have today.
+6. ~~`content_ideas.rs`'s title/hashtag generation feeds the LLM the *entire* transcript with no length budget...~~ — fixed: the budgeting logic was factored out of `music_gen.rs` into a new shared `llm_budget.rs` (`transcript_word_budget`/`transcript_text_for_prompt`, same language-aware token costs and beginning/middle/end sampling), and `content_ideas.rs`'s replacement command (`suggest_content_strategy`, see section 2.3) reuses it directly instead of duplicating the constants a second time.
+7. A Tamil transcript given to `suggest_content_strategy` **with no hints** can produce a fully coherent, well-formed strategy about an entirely fabricated, unrelated topic — confirmed directly across 3 separate real test runs on the same transcript, each inventing a different unrelated topic (a furniture-shop marketplace, a coffee shop, a rainbow-vegetable recipe — none present in the actual transcript, which is a generic "today we'll talk about how we finished this new project" line). This is a harder failure than `music_gen.rs`'s already-documented Tamil weakness (that one degrades *style-matching* on code-switched content; this one fabricates the *topic* outright on plain Tamil). Not fixed here — giving real hints alongside a Tamil transcript reliably anchors the topic even when transcript comprehension itself fails, so the practical mitigation is encouraging hints for Tamil content, not a prompt fix. A real fix would need the same translation-to-English step called out in item 5, which this app still doesn't have.
 
 Everything above runs 100% locally — `llama-server.exe` is a *local* HTTP
 server bound to `127.0.0.1` only, not a remote one, so this is still

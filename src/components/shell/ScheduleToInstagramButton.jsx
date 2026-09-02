@@ -16,13 +16,16 @@ function composeCaptionFromContentIdeas(ideas) {
   return [titleLine, hashtagLine].filter(Boolean).join("\n\n");
 }
 
-// Sits next to Burn & Export (see BurnExportButton.jsx) -- the natural
-// next step once a captioned video is actually on disk. Adapts its own
-// label ("Connect Instagram" vs "Schedule to Instagram") from the same
-// connection state InstagramPanel.jsx tracks, so there's no separate trip
-// to Settings needed just to see whether an account is hooked up yet.
-function ScheduleToInstagramButton({ videoPath, contentIdeas }) {
-  const [open, setOpen] = useState(false);
+// Rendered as one of ExportButton's menu options (see ExportButton.jsx) --
+// the natural next step once a captioned video is actually on disk.
+// Controlled (`open`/`onClose`) rather than owning its own trigger button
+// and open state: ExportButton's dropdown is what decides when this opens,
+// this component only ever renders the modal itself. The connection-state
+// check (hasConfig/account) that used to pick the trigger's own label
+// ("Connect Instagram" vs "Schedule to Instagram") still runs the same way
+// -- it now just decides what the *modal's body* shows on open, which it
+// already did anyway.
+function ScheduleToInstagramButton({ open, onClose, videoPath, contentIdeas }) {
   const [hasConfig, setHasConfig] = useState(false);
   const [account, setAccount] = useState(null);
   const [connecting, setConnecting] = useState(false);
@@ -113,27 +116,17 @@ function ScheduleToInstagramButton({ videoPath, contentIdeas }) {
 
   const connected = !!account;
 
-  return (
-    <>
-      <button
-        type="button"
-        className="schedule-instagram-button"
-        onClick={() => setOpen(true)}
-        disabled={!videoPath}
-        title={videoPath ? undefined : "Burn & Export a video first"}
-      >
-        {connected ? "Schedule to Instagram" : "Connect Instagram"}
-      </button>
+  if (!open) return null;
 
-      {open && (
-        <div className="shell-modal-backdrop" onClick={() => setOpen(false)}>
-          <div className="shell-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="shell-modal-header">
-              <h2>Schedule to Instagram</h2>
-              <button type="button" className="shell-modal-close" onClick={() => setOpen(false)}>
-                ✕
-              </button>
-            </div>
+  return (
+    <div className="shell-modal-backdrop" onClick={onClose}>
+      <div className="shell-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="shell-modal-header">
+          <h2>Schedule to Instagram</h2>
+          <button type="button" className="shell-modal-close" onClick={onClose}>
+            ✕
+          </button>
+        </div>
 
             <div className="inspector-panel">
               {!hasConfig && (
@@ -226,8 +219,6 @@ function ScheduleToInstagramButton({ videoPath, contentIdeas }) {
             </div>
           </div>
         </div>
-      )}
-    </>
   );
 }
 

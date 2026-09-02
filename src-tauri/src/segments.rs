@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 use tauri::AppHandle;
 use tokio::process::Command;
 
-use crate::captions::{build_ass_document, escape_ffmpeg_filter_path, CaptionStyle, ProsodyWord};
+use crate::captions::{build_ass_document, escape_ffmpeg_filter_path, CaptionStyle, CaptionStyleOverride, ProsodyWord};
 use crate::diarize::SpeakerSegment;
 use crate::ffmpeg::{best_encoder, run_capturing_progress, Encoder};
 use crate::pipeline::WordTimestamp;
@@ -154,6 +154,26 @@ fn shift_speakers(speakers: &[SpeakerSegment], start: f64, end: f64) -> Vec<Spea
         .collect()
 }
 
+/// Clips and rebases caption-style-override ranges into a segment's own
+/// local time frame. Uses `shift_speakers`'s overlap-filter-then-clip
+/// shape, not `shift_prosody`'s simpler start-only filter — an override
+/// is itself a *range* that can straddle a segment cut point (cuts are
+/// chosen by `snap_to_gap`, entirely independent of override ranges), so
+/// a partially-overlapping override must be clipped to the intersection
+/// and appear (clipped) in every segment it actually overlaps — never
+/// dropped, never duplicated in full.
+fn shift_overrides(overrides: &[CaptionStyleOverride], start: f64, end: f64) -> Vec<CaptionStyleOverride> {
+    overrides
+        .iter()
+        .filter(|o| o.start < end && o.end > start)
+        .map(|o| CaptionStyleOverride {
+            start: (o.start - start).max(0.0),
+            end: (o.end - start).min(end - start),
+            style: o.style.clone(),
+        })
+        .collect()
+}
+
 struct SegmentJob {
     index: usize,
     video_path: String,
@@ -167,13 +187,17 @@ struct SegmentJob {
     prosody: Vec<ProsodyWord>,
     /// Same idea, for diarization speaker segments.
     speakers: Vec<SpeakerSegment>,
+    /// Same idea, for per-portion caption style overrides — clipped to
+    /// this segment's own range, not just shifted (see `shift_overrides`).
+    overrides: Vec<CaptionStyleOverride>,
 }
 
 async fn burn_one_segment(job: SegmentJob, on_seconds: impl Fn(f64) + Send + 'static) -> Result<PathBuf, String> {
     let ass_path = unique_temp_path(&format!("segment-{}-captions", job.index), "ass");
     let local_prosody = shift_prosody(&job.prosody, job.segment.start, job.segment.end);
     let local_speakers = shift_speakers(&job.speakers, job.segment.start, job.segment.end);
-    let ass_contents = build_ass_document(&job.segment.words, &job.style, &local_prosody, &local_speakers)?;
+    let local_overrides = shift_overrides(&job.overrides, job.segment.start, job.segment.end);
+    let ass_contents = build_ass_document(&job.segment.words, &job.style, &local_prosody, &local_speakers, &local_overrides)?;
     std::fs::write(&ass_path, ass_contents).map_err(|e| format!("Failed to write subtitle file: {e}"))?;
 
     let filter = format!(
@@ -269,6 +293,8 @@ pub async fn burn_captions_segmented(
     segment_count: usize,
     prosody: &[ProsodyWord],
     speakers: &[SpeakerSegment],
+    overrides: &[CaptionStyleOverride],
+    project_id: &str,
 ) -> Result<(), String> {
     let encoder = best_encoder().await;
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
@@ -282,6 +308,7 @@ pub async fn burn_captions_segmented(
     emit_progress(
         app,
         "burn-progress",
+        project_id,
         "burning",
         Some(0.0),
         Some(format!(
@@ -294,6 +321,7 @@ pub async fn burn_captions_segmented(
     let mut handles = Vec::with_capacity(segments.len());
     for (index, segment) in segments.into_iter().enumerate() {
         let app_clone = app.clone();
+        let project_id_clone = project_id.to_string();
         let video_path = video_path.to_string();
         let style = style.clone();
         let progress = Arc::clone(&segment_progress);
@@ -301,6 +329,7 @@ pub async fn burn_captions_segmented(
         let total = total_duration;
         let prosody = prosody.to_vec();
         let speakers = speakers.to_vec();
+        let overrides = overrides.to_vec();
 
         handles.push(tokio::spawn(async move {
             let on_seconds = move |secs: f64| {
@@ -314,11 +343,21 @@ pub async fn burn_captions_segmented(
                         0.0
                     }
                 };
-                emit_progress(&app_clone, "burn-progress", "burning", Some(percent), None);
+                emit_progress(&app_clone, "burn-progress", &project_id_clone, "burning", Some(percent), None);
             };
 
             burn_one_segment(
-                SegmentJob { index, video_path, segment, style, encoder, threads: threads_per_segment, prosody, speakers },
+                SegmentJob {
+                    index,
+                    video_path,
+                    segment,
+                    style,
+                    encoder,
+                    threads: threads_per_segment,
+                    prosody,
+                    speakers,
+                    overrides,
+                },
                 on_seconds,
             )
             .await
@@ -359,7 +398,7 @@ pub async fn burn_captions_segmented(
     }
     concat_result?;
 
-    emit_progress(app, "burn-progress", "burning", Some(100.0), None);
+    emit_progress(app, "burn-progress", project_id, "burning", Some(100.0), None);
     Ok(())
 }
 
@@ -436,6 +475,52 @@ mod tests {
         let late_segment = segments.iter().find(|s| s.words.iter().any(|w| w.word == "late")).unwrap();
         let late_word = late_segment.words.iter().find(|w| w.word == "late").unwrap();
         assert_eq!(late_word.start, 60.0 - late_segment.start);
+    }
+
+    fn minimal_style() -> CaptionStyle {
+        CaptionStyle {
+            font_family: "Arial".to_string(),
+            font_size: 64,
+            text_color: "#FFFFFF".to_string(),
+            outline_color: "#000000".to_string(),
+            position: "bottom".to_string(),
+            animation: "none".to_string(),
+            words_per_line: 4,
+            bold: false,
+            italic: false,
+            letter_spacing: 0.0,
+            text_transform: "none".to_string(),
+            background: "none".to_string(),
+            background_color: "#000000".to_string(),
+            background_opacity: 70.0,
+            shadow_size: 0.0,
+            style_mode: "classic".to_string(),
+            accent_color: "#FFE600".to_string(),
+        }
+    }
+
+    #[test]
+    fn shift_overrides_clips_a_range_straddling_the_segment_boundary_into_both_segments() {
+        // An override spanning [8, 12) straddles a cut at 10 -- it must
+        // appear, clipped (not dropped, not duplicated in full), in BOTH
+        // the segment ending at 10 and the one starting at 10.
+        let overrides = vec![CaptionStyleOverride { start: 8.0, end: 12.0, style: minimal_style() }];
+
+        let first_segment = shift_overrides(&overrides, 0.0, 10.0);
+        assert_eq!(first_segment.len(), 1);
+        assert_eq!(first_segment[0].start, 8.0);
+        assert_eq!(first_segment[0].end, 10.0); // clipped to the segment's own end
+
+        let second_segment = shift_overrides(&overrides, 10.0, 20.0);
+        assert_eq!(second_segment.len(), 1);
+        assert_eq!(second_segment[0].start, 0.0); // rebased: 8.0 - 10.0 clamped to 0
+        assert_eq!(second_segment[0].end, 2.0); // rebased: 12.0 - 10.0
+    }
+
+    #[test]
+    fn shift_overrides_drops_a_range_entirely_outside_the_segment() {
+        let overrides = vec![CaptionStyleOverride { start: 50.0, end: 55.0, style: minimal_style() }];
+        assert_eq!(shift_overrides(&overrides, 0.0, 10.0).len(), 0);
     }
 
 }

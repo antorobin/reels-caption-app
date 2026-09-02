@@ -8,6 +8,7 @@ const STAGE_LABELS = {
   extracting: "Extracting",
   segmenting: "Finding speech segments",
   detecting_languages: "Detecting languages per segment",
+  copying: "Copying video into local storage",
 };
 
 export function formatElapsed(seconds) {

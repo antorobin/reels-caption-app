@@ -12,6 +12,57 @@
   font-style: normal;
 }
 
+/* Caption-theme display fonts (bundled, see src-tauri/resources/fonts/ for
+   the copies the ffmpeg burn pipeline uses via `fontsdir` — this is a
+   separate WebView rendering path, only for the theme picker's live
+   preview swatches and the style editor's own preview). Unlike Noto Sans
+   Tamil above, these are deliberately-selected display faces for specific
+   caption themes (src/lib/themes.js), not general script-coverage
+   fallbacks — each gets its own @font-face only, not added to :root's
+   base font-family stack. */
+@font-face {
+  font-family: "Montserrat";
+  src: url("./assets/fonts/Montserrat-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Bebas Neue";
+  src: url("./assets/fonts/BebasNeue-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Poppins";
+  src: url("./assets/fonts/Poppins-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Poppins";
+  src: url("./assets/fonts/Poppins-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Anton";
+  src: url("./assets/fonts/Anton-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Playfair Display";
+  src: url("./assets/fonts/PlayfairDisplay-Regular.ttf") format("truetype");
+  font-weight: 400 900;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Playfair Display";
+  src: url("./assets/fonts/PlayfairDisplay-Italic.ttf") format("truetype");
+  font-weight: 400 900;
+  font-style: italic;
+}
+
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans Tamil", sans-serif;
   color: #1a1a1a;
@@ -290,10 +341,55 @@ footer {
   gap: 16px;
 }
 
+.theme-category-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.theme-category-pill {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid #ddd;
+  background: #f7f7f8;
+  color: #1a1a1a;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.theme-category-pill:hover {
+  background: #eee;
+}
+
+.theme-category-pill.active {
+  background: #1a1a1a;
+  color: #fff;
+  border-color: #1a1a1a;
+}
+
 .theme-picker {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 10px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.current-theme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: #555;
+  padding: 2px 2px 0;
+}
+
+.current-theme-name {
+  font-weight: 600;
+  color: #1a1a1a;
 }
 
 .theme-card {
@@ -471,6 +567,108 @@ footer {
   animation: anim-slide-down-kf 1.8s ease-out infinite;
 }
 
+/* One-shot versions of the same entrance shapes, for the actual video
+   preview overlay (VideoPreview.jsx) rather than the theme picker's
+   always-looping swatch cards above. Durations mirror captions.rs's real
+   ASS `\t`/`\fad` timings (see build_animated_text) as closely as CSS
+   keyframes reasonably can, so switching a theme's animation is actually
+   visible during real playback, not just in the picker's own preview —
+   `infinite` there would loop for a chunk's whole multi-second display,
+   which the real one-shot burn never does. Re-keyed (React `key`) to the
+   active chunk's own start time so each new caption phrase gets a fresh
+   element and replays the animation, instead of only ever playing once
+   on first mount. */
+@keyframes video-overlay-fade-kf {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+@keyframes video-overlay-pop-kf {
+  0% {
+    transform: scale(0.6);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes video-overlay-bounce-kf {
+  0% {
+    transform: scale(0.6);
+  }
+  54.5% {
+    transform: scale(1.15);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes video-overlay-zoom-kf {
+  0% {
+    transform: scale(1.6);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+@keyframes video-overlay-slide-up-kf {
+  0% {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+@keyframes video-overlay-slide-down-kf {
+  0% {
+    transform: translateY(-24px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.video-overlay-anim-fade {
+  animation: video-overlay-fade-kf 150ms ease-in-out forwards;
+}
+.video-overlay-anim-pop {
+  animation: video-overlay-pop-kf 120ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+.video-overlay-anim-bounce {
+  animation: video-overlay-bounce-kf 220ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+.video-overlay-anim-zoom {
+  animation: video-overlay-zoom-kf 180ms ease-out forwards;
+}
+.video-overlay-anim-slide-up {
+  animation: video-overlay-slide-up-kf 220ms ease-out forwards;
+}
+.video-overlay-anim-slide-down {
+  animation: video-overlay-slide-down-kf 220ms ease-out forwards;
+}
+
+.video-overlay-word {
+  /* Deliberately `inline`, not `inline-block` -- an inline-block treats
+     its own content as an independent mini formatting context, so a
+     trailing space at the end of its text (the separator before the next
+     word's span) gets collapsed away as "whitespace at the end of a
+     line" even though it's genuinely present in the DOM (confirmed via a
+     real rendered-page inspection: textContent correctly read "This ",
+     but the words rendered glued together with no visible gap at all).
+     Plain `inline` keeps every word's separator part of one continuous
+     line, where only genuinely-leading/trailing whitespace of the whole
+     caption collapses, not the space between each word. */
+  transition: color 60ms linear;
+}
+
 .video-preview {
   display: flex;
   flex-direction: column;
@@ -608,7 +806,7 @@ footer {
 .shell-grid {
   display: grid;
   grid-template-rows: auto 1fr;
-  grid-template-columns: 220px 1fr 320px;
+  grid-template-columns: 260px 1fr 320px;
   height: 100vh;
   background: var(--shell-bg-0);
   color: var(--shell-text);
@@ -759,6 +957,25 @@ footer {
   justify-content: center;
 }
 
+.shell-sidebar-thumb-frame[role="button"] {
+  cursor: pointer;
+}
+
+.shell-sidebar-original-player {
+  display: block;
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  background: #000;
+}
+
+.shell-sidebar-original-toggle {
+  display: block;
+  width: 100%;
+  text-align: center;
+  padding: 6px 0 8px;
+  font-size: 11px;
+}
+
 .shell-sidebar-video-path {
   font-size: 12px;
   color: var(--shell-text);
@@ -774,6 +991,221 @@ footer {
   color: #6b6d75;
   line-height: 1.5;
   margin: 4px 0 0;
+}
+
+/* Editable title/description/hashtags for the currently-open project
+   (Sidebar.jsx) -- plain dark-shell form fields, same token set as the
+   rest of the sidebar chrome rather than the light .inspector-panel
+   styling used further down the tool panels. */
+.project-details-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.project-title-input,
+.project-description-input,
+.project-hashtags-input {
+  background: var(--shell-bg-2);
+  border: 1px solid var(--shell-border);
+  border-radius: 6px;
+  color: var(--shell-text);
+  font-size: 12px;
+  padding: 6px 8px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.project-title-input {
+  font-weight: 600;
+}
+
+.project-search-input {
+  background: var(--shell-bg-2);
+  border: 1px solid var(--shell-border);
+  border-radius: 6px;
+  color: var(--shell-text);
+  font-size: 12px;
+  padding: 6px 8px;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+}
+
+.project-date-filter {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.project-date-filter label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--shell-text-dim);
+  flex: 1;
+}
+
+.project-date-filter input[type="date"] {
+  background: var(--shell-bg-2);
+  border: 1px solid var(--shell-border);
+  border-radius: 6px;
+  color: var(--shell-text);
+  font-size: 11px;
+  padding: 5px 6px;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.project-date-filter .link-button {
+  font-size: 10.5px;
+  white-space: nowrap;
+  padding-bottom: 6px;
+}
+
+.project-list-heading {
+  margin-top: 4px;
+}
+
+.project-list-count {
+  color: var(--shell-text-dim);
+  font-weight: 400;
+}
+
+.project-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.project-list-item {
+  background: var(--shell-bg-2);
+  border: 1px solid var(--shell-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.project-list-item:hover {
+  border-color: var(--shell-accent);
+}
+
+.project-list-item.active {
+  border-color: var(--shell-accent);
+  box-shadow: 0 0 0 1px var(--shell-accent);
+}
+
+.project-list-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--shell-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-processing-badge {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--shell-accent);
+  margin-right: 6px;
+  vertical-align: middle;
+  animation: project-processing-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes project-processing-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.project-list-description {
+  font-size: 11px;
+  color: var(--shell-text-dim);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.project-list-hashtags,
+.project-list-filename {
+  font-size: 10.5px;
+  color: var(--shell-text-dim);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-list-dates {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--shell-text-dim);
+  opacity: 0.75;
+  margin-top: 3px;
+}
+
+.project-list-dates span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-delete-button {
+  align-self: flex-start;
+  background: none;
+  border: 1px solid var(--shell-border);
+  border-radius: 6px;
+  color: #e05252;
+  font-size: 11.5px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.project-delete-button:hover {
+  background: rgba(224, 82, 82, 0.1);
+  border-color: #e05252;
+}
+
+.project-list-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--shell-text-dim);
+  margin-top: 4px;
+}
+
+.project-list-pagination button {
+  background: var(--shell-bg-2);
+  border: 1px solid var(--shell-border);
+  border-radius: 4px;
+  color: var(--shell-text);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.project-list-pagination button:disabled {
+  color: var(--shell-text-dim);
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* Center column: video + waveform + contextual voice-over/tool sections.
@@ -836,6 +1268,17 @@ footer {
 .inspector-panel h2 {
   margin-top: 0;
   font-size: 15px;
+}
+
+.inspector-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.inspector-panel-header h2 {
+  margin-bottom: 0;
 }
 
 /* Deliberately plain hex values here, not var(--shell-*) -- those are
@@ -996,6 +1439,49 @@ footer {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.live-dictation-text {
+  background: var(--shell-bg-2);
+  border: 1px solid var(--shell-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  min-height: 40px;
+  font-size: 13px;
+  color: var(--shell-text);
+  white-space: pre-wrap;
+}
+
+.voiceover-record-button {
+  background: var(--shell-accent);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.voiceover-record-button.recording {
+  background: #dc2626;
+  animation: voiceover-record-pulse 1.4s ease-in-out infinite;
+}
+
+.voiceover-record-button:disabled {
+  background: var(--shell-bg-2);
+  color: var(--shell-text-dim);
+  cursor: not-allowed;
+  animation: none;
+}
+
+@keyframes voiceover-record-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(220, 38, 38, 0);
+  }
 }
 
 .voiceover-mode-body .field-row,
@@ -1178,7 +1664,40 @@ footer {
   gap: 10px;
 }
 
-.schedule-instagram-button {
+.music-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.music-suggestion-card {
+  padding: 10px;
+  background: #eef4ff;
+  border: 1px solid #b8cdf5;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #1a3a6b;
+}
+
+.music-suggestion-card p {
+  margin: 0 0 8px;
+}
+
+.music-suggestion-card audio {
+  margin-bottom: 8px;
+}
+
+.music-suggestion-card.selected {
+  border-color: #4f7fd6;
+  box-shadow: 0 0 0 1px #4f7fd6;
+}
+
+.export-button-wrap {
+  position: relative;
+}
+
+.export-button {
   background: var(--shell-bg-1);
   color: var(--shell-text);
   border: 1px solid var(--shell-border);
@@ -1190,9 +1709,51 @@ footer {
   white-space: nowrap;
 }
 
-.schedule-instagram-button:disabled {
+.export-button:disabled {
   color: var(--shell-text-dim);
   cursor: not-allowed;
+}
+
+/* Invisible full-viewport catcher, purely so a click anywhere outside the
+   menu closes it -- same "backdrop" trick as .shell-modal-backdrop, just
+   transparent since this is a small dropdown, not a modal. */
+.export-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+/* Opens upward, not down -- this button lives in the bottom-right dock
+   (.burn-export-dock), so a downward menu would render off-screen. */
+.export-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 41;
+  background: var(--shell-bg-1);
+  border: 1px solid var(--shell-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+}
+
+.export-menu button {
+  background: none;
+  border: none;
+  color: var(--shell-text);
+  text-align: left;
+  font-size: 13.5px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.export-menu button:hover {
+  background: var(--shell-bg-2);
 }
 
 /* Modal content below reuses .inspector-panel's plain light-theme styling
@@ -1222,6 +1783,83 @@ footer {
   color: #1a1a1a;
 }
 
+/* CaptionOverridePanel.jsx -- a compact inline panel (not a .shell-modal)
+   that appears right after a drag-select completes on the Timeline. */
+.caption-override-panel {
+  background: #f7f7f8;
+  color: #1a1a1a;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 14px;
+  margin-top: 10px;
+}
+
+.caption-override-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.caption-override-panel-header .shell-modal-close {
+  margin-left: auto;
+}
+
+.caption-override-panel-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: normal;
+}
+
+.caption-override-panel-range input[type="number"] {
+  width: 64px;
+}
+
+.add-override-button {
+  display: block;
+  margin-top: 6px;
+}
+
+.caption-override-panel-error {
+  color: #c0392b;
+  font-size: 12px;
+  margin: 0 0 10px;
+}
+
+.caption-override-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* The persistent override list, in MoreOptionsModal.jsx's "style" tab
+   below the base CaptionStyleEditor. */
+.caption-override-list {
+  margin-top: 16px;
+}
+
+.caption-override-list h3 {
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.caption-override-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #e2e2e2;
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+  color: #1a1a1a;
+}
+
 /* Wraps OptionalModelsBanner + UpdateBanner so they stack vertically
    without overlapping if both happen to be showing at once, instead of
    each independently fixed to the same bottom-left corner. */
@@ -1233,6 +1871,20 @@ footer {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.background-jobs-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--shell-bg-1);
+  border: 1px solid var(--shell-border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  max-width: 320px;
+  font-size: 12.5px;
+  color: var(--shell-text-dim);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
 }
 
 .optional-models-banner,
@@ -1435,6 +2087,21 @@ footer {
   bottom: 2px;
   background: repeating-linear-gradient(45deg, #c0392b, #c0392b 4px, transparent 4px, transparent 8px);
   border-radius: 2px;
+}
+
+.timeline-override-band {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: #7c3aed;
+  opacity: 0.65;
+  border-radius: 2px;
+}
+
+.timeline-override-band-pending {
+  background: #a855f7;
+  opacity: 0.4;
+  border: 1px dashed #7c3aed;
 }
 
 .timeline-playhead {

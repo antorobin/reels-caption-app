@@ -1,3 +1,4 @@
+import BackgroundJobsBanner from "./BackgroundJobsBanner.jsx";
 import BurnExportButton from "./BurnExportButton.jsx";
 import MainPanel from "./MainPanel.jsx";
 import MenuBar from "./MenuBar.jsx";
@@ -11,11 +12,27 @@ function AppShell(props) {
     <div className="shell-grid">
       <MenuBar />
 
-      <Sidebar videoPath={props.videoPath} onPickVideo={props.pickVideo} />
+      <Sidebar
+        videoPath={props.videoPath}
+        originalVideoPath={props.originalVideoPath}
+        onPickVideo={props.pickVideo}
+        importing={props.importing}
+        importProgress={props.importProgress}
+        currentProjectId={props.currentProjectId}
+        onSelectProject={props.loadProject}
+        projectTitle={props.projectTitle}
+        setProjectTitle={props.setProjectTitle}
+        projectDescription={props.projectDescription}
+        setProjectDescription={props.setProjectDescription}
+        projectHashtags={props.projectHashtags}
+        setProjectHashtags={props.setProjectHashtags}
+        generatingContentIdeas={props.generatingContentIdeas}
+      />
 
       <MainPanel
         videoRef={props.videoRef}
         videoPath={props.videoPath}
+        currentProjectId={props.currentProjectId}
         currentTime={props.currentTime}
         duration={props.duration}
         setCurrentTime={props.setCurrentTime}
@@ -27,6 +44,12 @@ function AppShell(props) {
         detectedLanguage={props.detectedLanguage}
         captionStyle={props.captionStyle}
         setCaptionStyle={props.setCaptionStyle}
+        captionThemeId={props.captionThemeId}
+        setCaptionThemeId={props.setCaptionThemeId}
+        resetCaptionStyleToFactoryDefault={props.resetCaptionStyleToFactoryDefault}
+        captionStyleOverrides={props.captionStyleOverrides}
+        addCaptionStyleOverride={props.addCaptionStyleOverride}
+        removeCaptionStyleOverride={props.removeCaptionStyleOverride}
         handleSeek={props.handleSeek}
         handleJumpCutApplied={props.handleJumpCutApplied}
         prosody={props.prosody}
@@ -42,7 +65,15 @@ function AppShell(props) {
         voiceoverPath={props.voiceoverPath}
         voiceoverOffset={props.voiceoverOffset}
         onVoiceoverReady={props.onVoiceoverReady}
+        musicPath={props.musicPath}
+        duckLevel={props.duckLevel}
+        onMusicBedChange={props.onMusicBedChange}
+        onCaptionsFromRecording={props.onCaptionsFromRecording}
         contentIdeas={props.contentIdeas}
+        contentStrategyOptions={props.contentStrategyOptions}
+        contentHints={props.contentHints}
+        setContentHints={props.setContentHints}
+        selectContentStrategyOption={props.selectContentStrategyOption}
         generatingContentIdeas={props.generatingContentIdeas}
         contentIdeasError={props.contentIdeasError}
         generateContentIdeas={props.generateContentIdeas}
@@ -54,6 +85,12 @@ function AppShell(props) {
         onWordChange={props.handleWordChange}
         onWordDelete={props.handleWordDelete}
         onSeek={props.handleSeek}
+        currentProjectId={props.currentProjectId}
+        onDeleteProject={props.deleteCurrentProject}
+        videoPath={props.videoPath}
+        pipelineRunning={props.pipelineRunning}
+        pipelineStatus={props.pipelineStatus}
+        onTranscribe={props.retranscribe}
       />
 
       <BurnExportButton
@@ -67,6 +104,7 @@ function AppShell(props) {
       />
 
       <div className="bottom-left-stack">
+        <BackgroundJobsBanner />
         <OptionalModelsBanner />
         <UpdateBanner />
       </div>

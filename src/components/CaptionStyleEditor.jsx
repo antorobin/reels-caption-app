@@ -1,7 +1,19 @@
 import { useEffect, useState } from "react";
 import { CAPTION_THEMES, defaultTheme } from "../lib/themes.js";
 
-export const FONT_OPTIONS = ["Arial", "Verdana", "Georgia", "Impact", "Courier New", "Noto Sans Tamil"];
+export const FONT_OPTIONS = [
+  "Arial",
+  "Verdana",
+  "Georgia",
+  "Impact",
+  "Courier New",
+  "Noto Sans Tamil",
+  "Montserrat",
+  "Bebas Neue",
+  "Poppins",
+  "Anton",
+  "Playfair Display",
+];
 export const POSITION_OPTIONS = [
   { value: "bottom", label: "Bottom" },
   { value: "middle", label: "Middle" },
@@ -180,9 +192,45 @@ export function defaultCaptionStyle() {
   return { ...defaultTheme().style };
 }
 
-function CaptionStyleEditor({ style, onChange }) {
+// Ordered by first appearance in CAPTION_THEMES rather than alphabetically,
+// so the filter pill row reads in the same "boldest/most common first"
+// order the theme cards themselves are authored in.
+const THEME_CATEGORIES = [...new Set(CAPTION_THEMES.map((t) => t.category))];
+
+// Key-order-independent equality for two style objects -- CaptionStyle is
+// always a flat object of primitives, so comparing sorted [key, value]
+// pairs is enough; no need for a general deep-equal library for this shape.
+function stylesAreEqual(a, b) {
+  const aKeys = Object.keys(a).sort();
+  const bKeys = Object.keys(b).sort();
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k, i) => k === bKeys[i] && a[k] === b[k]);
+}
+
+// "<theme name>" if `style` is still exactly that theme's own stock style,
+// "<theme name> (Custom)" the moment any field has been hand-tweaked away
+// from it -- computed fresh every time from `themeId` + `style` rather than
+// a separately-stored flag, so it can never drift out of sync with the
+// actual style values (see library.rs's DefaultCaptionStyle doc comment,
+// which this mirrors on the Rust side).
+function displayNameFor(themeId, style) {
+  const baseTheme = CAPTION_THEMES.find((t) => t.id === themeId);
+  if (!baseTheme) return "Custom";
+  return stylesAreEqual(style, baseTheme.style) ? baseTheme.name : `${baseTheme.name} (Custom)`;
+}
+
+function CaptionStyleEditor({ style, onChange, themeId, onThemeIdChange, onResetToFactoryDefault }) {
+  const [categoryFilter, setCategoryFilter] = useState("All");
+  const visibleThemes = categoryFilter === "All" ? CAPTION_THEMES : CAPTION_THEMES.filter((t) => t.category === categoryFilter);
+  const currentName = displayNameFor(themeId, style);
+
   function set(key, value) {
     onChange({ ...style, [key]: value });
+  }
+
+  function pickTheme(theme) {
+    onChange({ ...theme.style });
+    onThemeIdChange(theme.id);
   }
 
   const previewText = {
@@ -203,9 +251,29 @@ function CaptionStyleEditor({ style, onChange }) {
 
   return (
     <div className="style-editor">
+      <div className="theme-category-filter">
+        <button
+          type="button"
+          className={`theme-category-pill${categoryFilter === "All" ? " active" : ""}`}
+          onClick={() => setCategoryFilter("All")}
+        >
+          All
+        </button>
+        {THEME_CATEGORIES.map((category) => (
+          <button
+            key={category}
+            type="button"
+            className={`theme-category-pill${categoryFilter === category ? " active" : ""}`}
+            onClick={() => setCategoryFilter(category)}
+          >
+            {category}
+          </button>
+        ))}
+      </div>
+
       <div className="theme-picker">
-        {CAPTION_THEMES.map((theme) => (
-          <button key={theme.id} type="button" className="theme-card" onClick={() => onChange({ ...theme.style })} title={theme.description}>
+        {visibleThemes.map((theme) => (
+          <button key={theme.id} type="button" className="theme-card" onClick={() => pickTheme(theme)} title={theme.description}>
             <span className="theme-card-swatch">
               <ThemeCardPreview themeStyle={theme.style} />
             </span>
@@ -213,6 +281,13 @@ function CaptionStyleEditor({ style, onChange }) {
             <span className="theme-card-description">{theme.description}</span>
           </button>
         ))}
+      </div>
+
+      <div className="current-theme-row">
+        <span className="current-theme-name">Current: {currentName}</span>
+        <button type="button" className="link-button" onClick={onResetToFactoryDefault}>
+          Reset to factory default
+        </button>
       </div>
 
       <div className="style-controls">
