@@ -4,6 +4,8 @@ src-tauri/target/
 src-tauri/gen/
 .DS_Store
 *.log
+__pycache__/
+*.pyc
 
 # Per-developer Firebase project config — see .env.example.
 .env

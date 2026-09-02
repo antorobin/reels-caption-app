@@ -149,11 +149,17 @@ struct GenderOutput {
 /// gender-matched fallback tier when real cloning isn't possible. `None`
 /// (rather than a guess) when pitch tracking couldn't get a confident read.
 pub async fn detect_reference_gender(app: &AppHandle, reference_wav: &Path) -> Result<Option<String>, String> {
+    // `reference_wav`'s own path doubles as the scoping key -- a quick,
+    // fast media-ai utility step (see media_ai.rs's own doc comment) run
+    // ahead of the actual heavy voiceover synthesis, not itself part of
+    // the background-routed heavy work that needs a real project id.
+    let reference_wav_str = cli_path(reference_wav);
     let stdout = run_media_ai_script(
         app,
         "detect_gender.py",
-        vec![cli_path(reference_wav)],
+        vec![reference_wav_str.clone()],
         "voice-clone-progress",
+        &reference_wav_str,
         "detecting_gender",
     )
     .await?;

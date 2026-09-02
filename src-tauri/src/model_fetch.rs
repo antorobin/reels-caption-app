@@ -79,7 +79,11 @@ pub fn optional_models_missing() -> bool {
 pub async fn download_optional_models(app: AppHandle) -> Result<(), String> {
     let archive_path = unique_temp_path("optional-models", "tar.gz");
 
-    emit_progress(&app, "optional-models-progress", "downloading", Some(0.0), None);
+    // This is a one-time, app-wide optional-model download -- never
+    // per-project (nothing about it is scoped to any one project), so
+    // there's no real id to pass here, just the empty-string placeholder
+    // `emit_progress`'s signature now requires everywhere else.
+    emit_progress(&app, "optional-models-progress", "", "downloading", Some(0.0), None);
 
     let response = reqwest::get(RELEASE_ASSET_URL).await.map_err(|e| format!("Failed to start download: {e}"))?;
     if !response.status().is_success() {
@@ -105,13 +109,13 @@ pub async fn download_optional_models(app: AppHandle) -> Result<(), String> {
             // download), and the frontend only needs coarse updates.
             if percent - last_reported_percent >= 1.0 {
                 last_reported_percent = percent;
-                emit_progress(&app, "optional-models-progress", "downloading", Some(percent), None);
+                emit_progress(&app, "optional-models-progress", "", "downloading", Some(percent), None);
             }
         }
     }
     drop(file);
 
-    emit_progress(&app, "optional-models-progress", "extracting", Some(0.0), None);
+    emit_progress(&app, "optional-models-progress", "", "extracting", Some(0.0), None);
 
     let dest = per_machine_models_dir();
     std::fs::create_dir_all(&dest).map_err(|e| format!("Couldn't create {}: {e}", dest.display()))?;
@@ -130,6 +134,6 @@ pub async fn download_optional_models(app: AppHandle) -> Result<(), String> {
         return Err(format!("Extraction failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    emit_progress(&app, "optional-models-progress", "done", Some(100.0), None);
+    emit_progress(&app, "optional-models-progress", "", "done", Some(100.0), None);
     Ok(())
 }

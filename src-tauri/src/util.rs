@@ -121,17 +121,37 @@ pub fn verify_transcript_is_fresh(app: &AppHandle, video_path: &str) -> Result<(
 /// Payload for progress events emitted to the frontend while a long-running
 /// job (transcription, caption burning) runs in the background — lets the
 /// UI show a progress bar/stage label instead of freezing.
+///
+/// `project_id` was added alongside true multi-project background
+/// processing (see src/state/projectStore.js) -- before that, only one
+/// project ever ran a job at a time, so every listener on a given event
+/// name implicitly knew "this is for the one thing currently running."
+/// The instant two projects can run pipelines concurrently, both
+/// processes' ticks land on the same named event with nothing to tell
+/// them apart -- this field is that distinguisher. Frontend listeners
+/// filter on it before applying a tick to a project's own job state,
+/// exactly like the `projectIdRef`/`forProjectId` pattern already used
+/// for completion results.
 #[derive(Clone, Serialize)]
 pub struct ProgressPayload {
+    pub project_id: String,
     pub stage: String,
     pub percent: Option<f64>,
     pub message: Option<String>,
 }
 
-pub fn emit_progress(app: &AppHandle, event: &str, stage: &str, percent: Option<f64>, message: Option<String>) {
+pub fn emit_progress(
+    app: &AppHandle,
+    event: &str,
+    project_id: &str,
+    stage: &str,
+    percent: Option<f64>,
+    message: Option<String>,
+) {
     let _ = app.emit(
         event,
         ProgressPayload {
+            project_id: project_id.to_string(),
             stage: stage.to_string(),
             percent,
             message,

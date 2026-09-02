@@ -52,12 +52,13 @@ pub async fn run_media_ai_script(
     script: &str,
     args: Vec<String>,
     event_name: &str,
+    project_id: &str,
     stage: &str,
 ) -> Result<String, String> {
     let conda = resolve_media_ai_conda().await?;
     let script_path_arg = cli_path(&media_ai_script_path(script));
 
-    emit_progress(app, event_name, stage, None, Some(format!("Running {script}…")));
+    emit_progress(app, event_name, project_id, stage, None, Some(format!("Running {script}…")));
 
     let mut full_args =
         vec!["run".to_string(), "-n".to_string(), MEDIA_AI_ENV_NAME.to_string(), "python".to_string(), script_path_arg];
@@ -74,7 +75,7 @@ pub async fn run_media_ai_script(
         return Err(format!("{script} failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    emit_progress(app, event_name, stage, Some(100.0), None);
+    emit_progress(app, event_name, project_id, stage, Some(100.0), None);
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

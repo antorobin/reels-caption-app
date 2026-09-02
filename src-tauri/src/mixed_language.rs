@@ -40,6 +40,7 @@
 // segmentation itself any coarser (a genuine language switch, even a
 // quick one, still gets its own chunk).
 
+use std::collections::HashMap;
 use std::path::Path;
 use tauri::AppHandle;
 
@@ -78,10 +79,15 @@ const MODERATE_CONFIDENCE_MIN_DURATION: f64 = 0.8;
 /// same silence, never into neighboring speech.
 const CHUNK_PADDING_SECONDS: f64 = 0.15;
 
-struct LanguageChunk {
-    start: f64,
-    end: f64,
-    language: String,
+/// `pub(crate)` (not just used internally here) -- `streaming_stt.rs`'s
+/// live-dictation path reuses this and the three functions below directly,
+/// so the exact same segment-then-classify-then-route-then-merge logic
+/// (and its accumulated bug fixes) backs both the batch pipeline and live
+/// dictation, rather than a second, separately-maintained copy of it.
+pub(crate) struct LanguageChunk {
+    pub(crate) start: f64,
+    pub(crate) end: f64,
+    pub(crate) language: String,
 }
 
 /// Whisper's encoder works on a fixed ~30-second context window; asking
@@ -103,7 +109,7 @@ struct LanguageChunk {
 /// only how finely language is *sampled* across a long stretch.
 const MAX_SEGMENT_SECONDS_FOR_LANGUAGE_ID: f64 = 8.0;
 
-fn subdivide_long_segments(segments: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+pub(crate) fn subdivide_long_segments(segments: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
     let mut result = Vec::with_capacity(segments.len());
     for (start, end) in segments {
         let duration = end - start;
@@ -136,7 +142,7 @@ fn subdivide_long_segments(segments: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
 /// isn't one this app supports -- which showed up as multi-second gaps
 /// with no words at all where that audio should have been transcribed.
 /// Doesn't merge anything yet -- see `merge_into_chunks`.
-fn resolve_segment_languages(raw: Vec<(f64, f64, String, f64)>) -> Vec<(f64, f64, String)> {
+pub(crate) fn resolve_segment_languages(raw: Vec<(f64, f64, String, f64)>) -> Vec<(f64, f64, String)> {
     let n = raw.len();
 
     let trust: Vec<Option<String>> = raw
@@ -190,7 +196,7 @@ fn resolve_segment_languages(raw: Vec<(f64, f64, String, f64)>) -> Vec<(f64, f64
 /// contiguous chunk -- this is the step that actually protects
 /// transcription quality, by maximizing how much audio each real STT call
 /// gets to work with.
-fn merge_into_chunks(resolved: Vec<(f64, f64, String)>) -> Vec<LanguageChunk> {
+pub(crate) fn merge_into_chunks(resolved: Vec<(f64, f64, String)>) -> Vec<LanguageChunk> {
     let mut chunks: Vec<LanguageChunk> = Vec::new();
     for (start, end, language) in resolved {
         if let Some(last) = chunks.last_mut() {
@@ -209,6 +215,7 @@ async fn transcribe_chunk(
     audio_path: &Path,
     total_duration: f64,
     chunk: &LanguageChunk,
+    project_id: &str,
 ) -> Result<Vec<WordTimestamp>, String> {
     if !stt::is_supported_language_code(&chunk.language) {
         // An unresolvable stretch (e.g. nothing in the whole file ever
@@ -242,7 +249,7 @@ async fn transcribe_chunk(
         return Err(format!("Failed to slice audio chunk: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    let result = stt::transcribe_and_align(app, &slice_path, &chunk.language).await;
+    let result = stt::transcribe_and_align(app, &slice_path, &chunk.language, project_id).await;
     let _ = std::fs::remove_file(&slice_path);
     let (words, _echoed_language) = result?;
 
@@ -271,15 +278,15 @@ async fn transcribe_chunk(
 /// Segments `audio_path` (language-agnostically) and returns the resolved,
 /// merged same-language chunks covering it -- the shared first half of
 /// both the fast single-language path and the multi-chunk path below.
-async fn detect_language_chunks(app: &AppHandle, audio_path: &Path) -> Result<Vec<LanguageChunk>, String> {
-    emit_progress(app, PROGRESS_EVENT, "segmenting", Some(0.0), None);
+async fn detect_language_chunks(app: &AppHandle, audio_path: &Path, project_id: &str) -> Result<Vec<LanguageChunk>, String> {
+    emit_progress(app, PROGRESS_EVENT, project_id, "segmenting", Some(0.0), None);
     let raw_segments = ffmpeg::detect_speech_segments(audio_path).await?;
     if raw_segments.is_empty() {
         return Ok(Vec::new());
     }
     let raw_segments = subdivide_long_segments(raw_segments);
 
-    emit_progress(app, PROGRESS_EVENT, "detecting_languages", Some(0.0), None);
+    emit_progress(app, PROGRESS_EVENT, project_id, "detecting_languages", Some(0.0), None);
     let raw_with_language = stt::detect_spoken_languages_batch(audio_path, &raw_segments).await?;
 
     let resolved = resolve_segment_languages(raw_with_language);
@@ -295,11 +302,12 @@ async fn detect_language_chunks(app: &AppHandle, audio_path: &Path) -> Result<Ve
 pub(crate) async fn transcribe_with_language_detection(
     app: &AppHandle,
     audio_path: &Path,
+    project_id: &str,
 ) -> Result<(Vec<WordTimestamp>, Option<String>), String> {
-    let chunks = detect_language_chunks(app, audio_path).await?;
+    let chunks = detect_language_chunks(app, audio_path, project_id).await?;
 
     let [single] = chunks.as_slice() else {
-        return transcribe_mixed_chunks(app, audio_path, &chunks).await;
+        return transcribe_mixed_chunks(app, audio_path, &chunks, project_id).await;
     };
 
     if !stt::is_supported_language_code(&single.language) {
@@ -309,7 +317,7 @@ pub(crate) async fn transcribe_with_language_detection(
             stt::supported_language_names().join(", ")
         ));
     }
-    let (words, _echoed_language) = stt::transcribe_and_align(app, audio_path, &single.language).await?;
+    let (words, _echoed_language) = stt::transcribe_and_align(app, audio_path, &single.language, project_id).await?;
     Ok((words, Some(stt::language_name_for_code(&single.language))))
 }
 
@@ -317,6 +325,7 @@ async fn transcribe_mixed_chunks(
     app: &AppHandle,
     audio_path: &Path,
     chunks: &[LanguageChunk],
+    project_id: &str,
 ) -> Result<(Vec<WordTimestamp>, Option<String>), String> {
     if chunks.is_empty() {
         return Ok((Vec::new(), None));
@@ -331,17 +340,144 @@ async fn transcribe_mixed_chunks(
     let mut languages_seen = std::collections::BTreeSet::new();
     let chunk_count = chunks.len().max(1);
     for (i, chunk) in chunks.iter().enumerate() {
-        emit_progress(app, PROGRESS_EVENT, "transcribing", Some((i as f64 / chunk_count as f64) * 100.0), None);
-        let words = transcribe_chunk(app, audio_path, total_duration, chunk).await?;
+        emit_progress(app, PROGRESS_EVENT, project_id, "transcribing", Some((i as f64 / chunk_count as f64) * 100.0), None);
+        let words = transcribe_chunk(app, audio_path, total_duration, chunk, project_id).await?;
         if !words.is_empty() {
             languages_seen.insert(stt::language_name_for_code(&chunk.language));
         }
         all_words.extend(words);
     }
-    emit_progress(app, PROGRESS_EVENT, "transcribing", Some(100.0), None);
+    emit_progress(app, PROGRESS_EVENT, project_id, "transcribing", Some(100.0), None);
 
     let detected_language =
         if languages_seen.is_empty() { None } else { Some(languages_seen.into_iter().collect::<Vec<_>>().join(" + ")) };
 
     Ok((all_words, detected_language))
+}
+
+/// A standalone voiceover-style recording -- anything handed to
+/// `pipeline.rs`'s `transcribe_audio_file` (an uploaded/generated/mic-
+/// recorded replacement track from `VoiceoverSection.jsx`, or a live-
+/// dictation chunk) -- is always one speaker doing one continuous take in
+/// one language. Unlike a full video, there's no real within-clip language
+/// switch to catch, so `detect_language_chunks`' whole strategy (chop on
+/// every natural pause, classify each tiny piece, forward/backward-fill
+/// from whichever few happen to cross a confidence bar) is solving a
+/// problem this input doesn't have -- and turned out to actively hurt here.
+///
+/// Confirmed directly against a real ~53s Tamil mic recording, not
+/// hypothesized: `detect_language_chunks`' per-pause segments (~1-4s each)
+/// produced wildly inconsistent guesses across more than half a dozen
+/// unrelated languages, and by pure chance the only two segments that
+/// crossed the confidence threshold both said "English" -- which then
+/// forward/backward-filled across the *entire* recording, silently routing
+/// genuinely Tamil audio through the English-only transcriber and coming
+/// back with an empty transcript and no error (Parakeet given real Tamil
+/// phonetics just produces nothing it's confident enough to say). Forcing
+/// the same recording through the Tamil transcriber directly proved the
+/// audio itself was never the problem: a full, coherent 37-word Tamil
+/// transcript came right out.
+///
+/// The fix: classify a handful of large windows across the clip and
+/// majority-vote, instead of dozens of tiny, easily-wrong ones. Verified on
+/// the same real recording -- three large (~28s) windows independently
+/// agreed on Tamil even though a *single* whole-clip call (all 53s in one
+/// shot) narrowly favored the wrong language, so this needs more than one
+/// sample, just far fewer and far larger ones than the video-oriented path
+/// uses.
+const SOLO_LANGUAGE_ID_WINDOW_SECONDS: f64 = 20.0;
+
+pub(crate) async fn transcribe_solo_recording_with_language_detection(
+    app: &AppHandle,
+    audio_path: &Path,
+    project_id: &str,
+) -> Result<(Vec<WordTimestamp>, Option<String>), String> {
+    let duration = ffmpeg::probe_duration_seconds(&cli_path(audio_path))
+        .await
+        .ok_or("Couldn't determine the recording's duration.".to_string())?;
+    if duration <= 0.0 {
+        return Ok((Vec::new(), None));
+    }
+
+    let window_count = ((duration / SOLO_LANGUAGE_ID_WINDOW_SECONDS).ceil() as usize).max(1);
+    let window_len = duration / window_count as f64;
+    let windows: Vec<(f64, f64)> = (0..window_count)
+        .map(|i| {
+            let start = i as f64 * window_len;
+            let end = if i + 1 == window_count { duration } else { (i + 1) as f64 * window_len };
+            (start, end)
+        })
+        .collect();
+
+    let raw_with_language = stt::detect_spoken_languages_batch(audio_path, &windows).await?;
+
+    // Majority vote among windows that resolved to a language this app can
+    // actually transcribe -- an unsupported guess (Telugu, Hindi, ...)
+    // doesn't get a vote. Ties broken by total summed confidence, not just
+    // vote count, so e.g. 1 window at 90% doesn't lose to 1 window at 40%
+    // when both only got a single vote.
+    let mut votes: HashMap<String, (usize, f64)> = HashMap::new();
+    for (_, _, language, probability) in &raw_with_language {
+        if stt::is_supported_language_code(language) {
+            let entry = votes.entry(language.clone()).or_insert((0, 0.0));
+            entry.0 += 1;
+            entry.1 += probability;
+        }
+    }
+
+    let resolved_language = votes
+        .into_iter()
+        .max_by(|(_, a), (_, b)| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)))
+        .map(|(language, _)| language)
+        .unwrap_or_else(|| {
+            // Not one window ever resolved to a language this app directly
+            // supports. Before giving up, check for the *specific* failure
+            // mode this app's own supported-language set actually invites:
+            // whisper-tiny's language-ID is a small, general-purpose model
+            // with no special training to tell South Dravidian languages
+            // apart from each other -- they share enough acoustic/phonetic
+            // structure (independent of their different scripts) that it
+            // confuses them often. Confirmed directly on real audio: the
+            // same genuinely-Tamil recording that motivated this whole
+            // function had its two least-confident-for-Tamil windows guess
+            // Telugu and Malayalam instead of Tamil, not some unrelated
+            // language family. Since Tamil is the only Dravidian language
+            // this app can actually transcribe, a Dravidian-family guess is
+            // read as "probably Tamil, the lang-ID model just can't
+            // distinguish which one" rather than "definitely unsupported."
+            // This is NOT a general "nearest-supported-language" guess --
+            // an unrelated wrong guess (French, Mandarin, ...) still falls
+            // through to the real "unsupported" error below, because
+            // reusing the Tamil model there would force its Tamil-specific
+            // fine-tune to transcribe totally unrelated phonetics into
+            // Tamil script, producing confident-looking nonsense instead of
+            // real text (the same failure mode already documented above for
+            // code-switched English inside Tamil speech).
+            const CONFUSED_WITH_TAMIL: &[&str] = &["te", "ml", "kn"];
+            let dravidian_neighbor_seen =
+                raw_with_language.iter().any(|(_, _, language, _)| CONFUSED_WITH_TAMIL.contains(&language.as_str()));
+            if dravidian_neighbor_seen && stt::is_supported_language_code("ta") {
+                return "ta".to_string();
+            }
+
+            // Genuinely nothing to go on -- fall back to whichever single
+            // window was most confident, rather than erroring outright over
+            // what could still just be a detection-accuracy problem.
+            raw_with_language
+                .iter()
+                .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(_, _, language, _)| language.clone())
+                .unwrap_or_default()
+        });
+
+    if !stt::is_supported_language_code(&resolved_language) {
+        return Err(format!(
+            "Detected spoken language '{}' isn't supported yet -- this app currently supports: {}.",
+            resolved_language,
+            stt::supported_language_names().join(", ")
+        ));
+    }
+
+    let (words, _echoed_language) = stt::transcribe_and_align(app, audio_path, &resolved_language, project_id).await?;
+    Ok((words, Some(stt::language_name_for_code(&resolved_language))))
 }

@@ -157,10 +157,13 @@ pub async fn remove_silence_and_fillers(
     video_path: String,
     words: Vec<WordTimestamp>,
     options: JumpCutOptions,
+    project_id: String,
 ) -> Result<JumpCutResult, String> {
     if words.is_empty() {
         return Err("No transcript to work from — run the transcription pipeline first.".to_string());
     }
+
+    let _permit = crate::concurrency::acquire_encode().await;
 
     let duration = probe_duration_seconds(&video_path)
         .await
@@ -203,7 +206,7 @@ pub async fn remove_silence_and_fillers(
     args.push("160k".to_string());
     args.push(output_path_arg.clone());
 
-    run_with_progress(&app, PROGRESS_EVENT, "trimming", args, Some(kept_duration)).await?;
+    run_with_progress(&app, PROGRESS_EVENT, &project_id, "trimming", args, Some(kept_duration)).await?;
 
     // The trimmed output is a brand-new file with remapped word timings
     // that are correct for it *right now* — record that so burn_captions

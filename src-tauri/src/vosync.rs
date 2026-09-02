@@ -32,11 +32,17 @@ struct OffsetOnlyOutput {
 
 #[tauri::command]
 pub async fn compute_voiceover_offset(app: AppHandle, video_path: String, voiceover_path: String) -> Result<f64, String> {
+    // `video_path` doubles as the scoping key -- this is a self-contained,
+    // foreground-only tool (VoiceoverSection.jsx's live-preview sync, no
+    // background routing), so there's no real concurrent-listener
+    // collision to guard against, just the new required parameter to
+    // satisfy (see media_ai.rs's own doc comment).
     let stdout = run_media_ai_script(
         &app,
         "vo_sync.py",
-        vec!["--video".to_string(), video_path, "--voiceover".to_string(), voiceover_path, "--offset-only".to_string()],
+        vec!["--video".to_string(), video_path.clone(), "--voiceover".to_string(), voiceover_path, "--offset-only".to_string()],
         "vosync-progress",
+        &video_path,
         "syncing",
     )
     .await?;
@@ -58,7 +64,7 @@ pub async fn sync_voice_over(
         "vo_sync.py",
         vec![
             "--video".to_string(),
-            video_path,
+            video_path.clone(),
             "--voiceover".to_string(),
             voiceover_path,
             "--ffmpeg".to_string(),
@@ -67,6 +73,7 @@ pub async fn sync_voice_over(
             output_path,
         ],
         "vosync-progress",
+        &video_path,
         "syncing",
     )
     .await?;

@@ -22,25 +22,33 @@
 
 mod bin_paths;
 mod captions;
+mod concurrency;
 mod conda_util;
 mod content_ideas;
 mod diarize;
+mod dictation;
 mod ducking;
 mod ffmpeg;
 mod instagram;
 mod jumpcuts;
+mod embeddings;
+mod library;
 mod llm;
+mod llm_budget;
 mod loudness;
 mod media_ai;
 mod media_host;
+mod mic_recording;
 mod mixed_language;
 mod model_fetch;
+mod music_gen;
 mod pipeline;
 mod proc_cleanup;
 mod scheduler;
 mod segments;
 mod slang;
 mod stt;
+mod streaming_stt;
 mod tray;
 mod tts;
 mod util;
@@ -105,6 +113,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| dictation::handle_shortcut(app, shortcut, event))
+                .build(),
+        )
         // The launch-args payload (`Some(vec![...])`) only matters on
         // platforms that re-exec the binary with extra flags to detect an
         // autostart-triggered launch (Windows/Linux don't need this) --
@@ -120,6 +133,9 @@ pub fn run() {
             proc_cleanup::init_kill_on_exit();
 
             tray::init(app.handle())?;
+            dictation::init(app.handle())?;
+            app.manage(streaming_stt::LiveDictationState::default());
+            app.manage(streaming_stt::LiveWorkerState::default());
 
             // Runs once a minute on Tauri's own tokio runtime for as long
             // as the process lives -- including while the window is closed
@@ -144,7 +160,7 @@ pub fn run() {
             pipeline::transcribe_audio_file,
             captions::burn_captions,
             captions::analyze_prosody,
-            content_ideas::generate_content_ideas,
+            content_ideas::suggest_content_strategy,
             diarize::diarize_speakers,
             ducking::duck_music,
             instagram::save_instagram_app_config,
@@ -155,14 +171,32 @@ pub fn run() {
             instagram::disconnect_instagram_account,
             instagram::post_to_instagram_now,
             jumpcuts::remove_silence_and_fillers,
+            library::create_project,
+            library::list_projects,
+            library::get_project,
+            library::reembed_project,
+            library::search_projects,
+            library::save_project,
+            library::delete_project,
+            library::processed_output_path,
+            library::reveal_in_folder,
+            library::export_file,
+            library::get_default_caption_style,
+            library::save_default_caption_style,
+            library::reset_default_caption_style,
             loudness::normalize_audio,
+            mic_recording::save_recorded_voice,
             model_fetch::check_optional_models,
             model_fetch::optional_models_missing,
             model_fetch::download_optional_models,
+            music_gen::suggest_background_music,
+            music_gen::finalize_background_music,
             scheduler::list_scheduled_posts,
             scheduler::schedule_instagram_post,
             scheduler::delete_scheduled_post,
             stt::get_supported_languages,
+            streaming_stt::start_live_dictation,
+            streaming_stt::stop_live_dictation,
             tts::generate_voiceover,
             util::fingerprint_video_file,
             vosync::compute_voiceover_offset,

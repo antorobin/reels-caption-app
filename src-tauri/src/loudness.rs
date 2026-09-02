@@ -68,11 +68,17 @@ pub async fn normalize_loudness(app: &AppHandle, input_path: &str, output_path: 
         output_path.to_string(),
     ];
 
-    run_with_progress(app, "loudness-progress", "normalizing_loudness", args, duration).await
+    // `input_path` doubles as the scoping key here, not a real project id --
+    // LoudnessPanel.jsx is a self-contained, foreground-only tool with no
+    // background routing (confirmed: no App.jsx callback, writes to a
+    // user-chosen save() path), so there's no real concurrent-listener
+    // collision this needs to guard against the way burn/duck/jump-cut do.
+    run_with_progress(app, "loudness-progress", input_path, "normalizing_loudness", args, duration).await
 }
 
 #[tauri::command]
 pub async fn normalize_audio(app: AppHandle, video_path: String, output_path: String, target_lufs: Option<f64>) -> Result<String, String> {
+    let _permit = crate::concurrency::acquire_encode().await;
     normalize_loudness(&app, &video_path, &output_path, target_lufs.unwrap_or(DEFAULT_TARGET_LUFS)).await?;
     Ok(output_path)
 }

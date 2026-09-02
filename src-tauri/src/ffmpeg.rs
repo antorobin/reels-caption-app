@@ -5,7 +5,6 @@
 // "Burn captions".
 
 use std::process::Stdio;
-use std::sync::OnceLock;
 use tauri::AppHandle;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
@@ -48,6 +47,40 @@ pub async fn has_audio_stream(path: &str) -> bool {
         Ok(o) => o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
         Err(_) => false,
     }
+}
+
+/// Repeats a shorter audio file to fill `target_duration_seconds` --
+/// `music_gen.rs` needs this because generating a bed directly at the
+/// video's full length is capped (real CPU generation time scales with
+/// requested length), so a longer video gets a shorter bed looped instead.
+/// `-stream_loop -1` on the input repeats it indefinitely; `-t` then cuts
+/// the output to the exact target length regardless of how evenly the loop
+/// count divides into it. `-c copy` avoids a needless re-encode of already-
+/// decoded PCM. Known v1 trade-off, not addressed here: the loop point
+/// itself isn't crossfaded, so a hard seam can be audible on a very
+/// short/percussive bed.
+pub async fn loop_audio_to_duration(input_path: &std::path::Path, output_path: &std::path::Path, target_duration_seconds: f64) -> Result<(), String> {
+    let output = Command::new(crate::bin_paths::ffmpeg_path())
+        .args([
+            "-y".to_string(),
+            "-stream_loop".to_string(),
+            "-1".to_string(),
+            "-i".to_string(),
+            cli_path(input_path),
+            "-t".to_string(),
+            target_duration_seconds.to_string(),
+            "-c".to_string(),
+            "copy".to_string(),
+            cli_path(output_path),
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run ffmpeg to loop the music bed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!("Failed to loop the music bed to length: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
 }
 
 /// How sensitive `detect_speech_segments` is to what counts as "silence" --
@@ -123,7 +156,19 @@ pub async fn detect_speech_segments(audio_path: &std::path::Path) -> Result<Vec<
 /// not something to redo per burn job) and prefer it. `libass` subtitle
 /// rendering itself stays on the CPU either way (there's no portable GPU
 /// path for it), but the expensive part — encoding — gets offloaded.
-static BEST_ENCODER: OnceLock<Encoder> = OnceLock::new();
+///
+/// `tokio::sync::OnceCell`, not `std::sync::OnceLock` — this needs an
+/// *async* initializer (the hardware probe below spawns ffmpeg
+/// subprocesses), and `OnceLock::get_or_init` only accepts a sync closure.
+/// The previous check-then-await-then-`get_or_init` pattern this used to
+/// be had a real race under concurrency (now possible now that more than
+/// one project can process at once — see concurrency.rs): two callers
+/// could both observe `get()` as `None` and both run the full multi-probe
+/// sequence before either stored the result. `OnceCell::get_or_init`
+/// guarantees exactly one initializing future ever runs even if several
+/// callers race in — the same pattern already proven correct by
+/// `tts.rs`'s `resolve_tts_prefix`.
+static BEST_ENCODER: tokio::sync::OnceCell<Encoder> = tokio::sync::OnceCell::const_new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoder {
@@ -189,21 +234,19 @@ async fn encoder_actually_works(codec: &str) -> bool {
 
 /// Detects and caches the best available H.264 encoder on this machine.
 pub async fn best_encoder() -> Encoder {
-    if let Some(cached) = BEST_ENCODER.get() {
-        return *cached;
-    }
-
-    let chosen = if encoder_actually_works("h264_nvenc").await {
-        Encoder::Nvenc
-    } else if encoder_actually_works("h264_qsv").await {
-        Encoder::Qsv
-    } else if encoder_actually_works("h264_amf").await {
-        Encoder::Amf
-    } else {
-        Encoder::SoftwareX264
-    };
-
-    *BEST_ENCODER.get_or_init(|| chosen)
+    *BEST_ENCODER
+        .get_or_init(|| async {
+            if encoder_actually_works("h264_nvenc").await {
+                Encoder::Nvenc
+            } else if encoder_actually_works("h264_qsv").await {
+                Encoder::Qsv
+            } else if encoder_actually_works("h264_amf").await {
+                Encoder::Amf
+            } else {
+                Encoder::SoftwareX264
+            }
+        })
+        .await
 }
 
 /// Runs ffmpeg with `args` (everything except `-progress`, which this adds
@@ -261,22 +304,24 @@ pub async fn run_capturing_progress(
 pub async fn run_with_progress(
     app: &AppHandle,
     event_name: &str,
+    project_id: &str,
     stage: &str,
     args: Vec<String>,
     duration_secs: Option<f64>,
 ) -> Result<(), String> {
-    emit_progress(app, event_name, stage, Some(0.0), None);
+    emit_progress(app, event_name, project_id, stage, Some(0.0), None);
 
     let app_progress = app.clone();
     let event_name_owned = event_name.to_string();
+    let project_id_owned = project_id.to_string();
     let stage_owned = stage.to_string();
     run_capturing_progress(args, move |seconds| {
         let percent = duration_secs.filter(|d| *d > 0.0).map(|d| (seconds / d * 100.0).clamp(0.0, 100.0));
-        emit_progress(&app_progress, &event_name_owned, &stage_owned, percent, None);
+        emit_progress(&app_progress, &event_name_owned, &project_id_owned, &stage_owned, percent, None);
     })
     .await?;
 
-    emit_progress(app, event_name, stage, Some(100.0), None);
+    emit_progress(app, event_name, project_id, stage, Some(100.0), None);
     Ok(())
 }
 

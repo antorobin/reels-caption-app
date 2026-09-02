@@ -24,7 +24,12 @@ pub struct SpeakerSegment {
 const DIARIZE_MIN_GAP_SECONDS: f64 = 0.9;
 
 #[tauri::command]
-pub async fn diarize_speakers(app: AppHandle, video_path: String, words: Vec<WordTimestamp>) -> Result<Vec<SpeakerSegment>, String> {
+pub async fn diarize_speakers(
+    app: AppHandle,
+    video_path: String,
+    words: Vec<WordTimestamp>,
+    project_id: String,
+) -> Result<Vec<SpeakerSegment>, String> {
     if words.is_empty() {
         return Ok(Vec::new());
     }
@@ -32,7 +37,7 @@ pub async fn diarize_speakers(app: AppHandle, video_path: String, words: Vec<Wor
     let options = JumpCutOptions { min_silence_seconds: DIARIZE_MIN_GAP_SECONDS, remove_filler_words: false };
     let segments = compute_keep_ranges(&words, duration, &options);
 
-    let audio_path = crate::pipeline::extract_audio(&app, &video_path).await?;
+    let audio_path = crate::pipeline::extract_audio(&app, &video_path, &project_id).await?;
 
     let segments_json_path = unique_temp_path("diarize-segments", "json");
     let segments_json =
@@ -49,6 +54,7 @@ pub async fn diarize_speakers(app: AppHandle, video_path: String, words: Vec<Wor
             cli_path(&segments_json_path),
         ],
         "diarize-progress",
+        &project_id,
         "diarizing",
     )
     .await;

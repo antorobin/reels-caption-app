@@ -38,6 +38,10 @@ win32job = "2"
 # separate plugin the way it was in v1.
 tauri = { version = "2.0.0", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-autostart = "2"
+# Global hotkey for the mic-dictation HUD (dictation.rs) -- works even
+# when the main window is closed/tray-only, matching the rest of this
+# app's "still useful while just an icon in the tray" design.
+tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2.0.0"
 tauri-plugin-notification = "2"
 # Checks a static `latest.json` manifest (see tauri.conf.json's
@@ -95,6 +99,43 @@ tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt"]
 # enables incremental (not fully-buffered) download writes for the
 # ~360MB optional-models archive.
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# Native, cross-platform microphone capture for live dictation
+# (streaming_stt.rs) -- direct OS audio-device access instead of the
+# browser's getUserMedia/MediaRecorder (which the existing "Record from
+# mic" voiceover feature already uses), since live dictation needs raw PCM
+# samples fed in continuously rather than a single compressed blob
+# assembled after recording stops. An earlier version of this feature also
+# used `sherpa-onnx` for a true incremental-streaming recognizer -- dropped
+# in favor of periodically re-transcribing through the existing Parakeet/
+# Indic Whisper pipeline instead (see streaming_stt.rs's doc comment),
+# specifically because no streaming-capable model exists for Tamil (or
+# Tamil+English code-switching) today. That also removed a real, confirmed
+# build headache: sherpa-onnx's prebuilt Windows library only links against
+# MSVC, not this project's GNU/MinGW toolchain, and needed a `shared`
+# (DLL) workaround plus not-yet-verified installer-bundling follow-up --
+# none of which is a concern anymore now that dependency is gone.
+cpal = "0.15"
+# Local, embedded database for the persistent project library (library.rs)
+# -- "bundled" compiles SQLite's own C source directly into this binary
+# via the `cc` crate rather than depending on a system SQLite install
+# (which on Windows usually doesn't exist at all) or its version being new
+# enough. Verified directly against this project's actual MinGW/GNU
+# toolchain before writing any code around it -- sherpa-onnx's prebuilt-
+# MSVC-only library was a real, confirmed build blocker earlier in this
+# project's history (see streaming_stt.rs's own doc comment), so a new
+# C-toting dependency gets checked against a real `cargo build` up front
+# this time, not assumed to just work.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# sqlite-vec: the project library's semantic search (library.rs's
+# `search_projects`) -- a real cosine-KNN virtual table extension, verified
+# directly against this exact rusqlite version via a standalone probe
+# before writing any code around it (same discipline as rusqlite itself,
+# above) -- a real, working `vec0` table with `distance_metric=cosine`
+# correctly ranked 3 test embeddings by actual similarity, not insertion
+# order. `zerocopy` is the crate sqlite-vec's own docs recommend for
+# passing `Vec<f32>` embeddings in without an extra copy.
+sqlite-vec = "0.1.9"
+zerocopy = "0.7"
 
 [features]
 # this feature is used for production builds where `devPath` points to the filesystem

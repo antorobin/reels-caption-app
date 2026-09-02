@@ -75,6 +75,7 @@ pub async fn duck_music_bed(
     words: &[WordTimestamp],
     duck_level: f64,
     output_path: &str,
+    project_id: &str,
 ) -> Result<(), String> {
     let windows = speech_windows_from_words(words);
     let expr = build_ducking_volume_expr(&windows, duck_level);
@@ -102,7 +103,7 @@ pub async fn duck_music_bed(
         output_path.to_string(),
     ];
 
-    run_with_progress(app, "ducking-progress", "ducking_music", args, duration).await
+    run_with_progress(app, "ducking-progress", project_id, "ducking_music", args, duration).await
 }
 
 #[tauri::command]
@@ -113,8 +114,10 @@ pub async fn duck_music(
     words: Vec<WordTimestamp>,
     duck_level: f64,
     output_path: String,
+    project_id: String,
 ) -> Result<String, String> {
-    duck_music_bed(&app, &video_path, &music_path, &words, duck_level, &output_path).await?;
+    let _permit = crate::concurrency::acquire_encode().await;
+    duck_music_bed(&app, &video_path, &music_path, &words, duck_level, &output_path, &project_id).await?;
     Ok(output_path)
 }
 

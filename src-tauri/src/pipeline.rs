@@ -42,8 +42,8 @@ pub struct PipelineResult {
 
 /// Extracts mono 16kHz PCM WAV audio from `video_path`. Returns the path
 /// to the extracted audio file.
-pub(crate) async fn extract_audio(app: &AppHandle, video_path: &str) -> Result<PathBuf, String> {
-    emit_progress(app, PROGRESS_EVENT, "extracting_audio", None, None);
+pub(crate) async fn extract_audio(app: &AppHandle, video_path: &str, project_id: &str) -> Result<PathBuf, String> {
+    emit_progress(app, PROGRESS_EVENT, project_id, "extracting_audio", None, None);
 
     let audio_path = unique_temp_path("audio", "wav");
     let audio_path_arg = cli_path(&audio_path);
@@ -74,8 +74,14 @@ pub(crate) async fn extract_audio(app: &AppHandle, video_path: &str) -> Result<P
 async fn transcribe_with_auto_language(
     app: &AppHandle,
     audio_path: &Path,
+    project_id: &str,
 ) -> Result<(Vec<WordTimestamp>, Option<String>), String> {
-    crate::mixed_language::transcribe_with_language_detection(app, audio_path).await
+    // Held for the whole STT call -- this loads its own model into memory
+    // independently per call (see concurrency.rs's own doc comment), so
+    // it's exactly the kind of operation the heavy-ML gate exists for now
+    // that more than one project can be transcribing at once.
+    let _permit = crate::concurrency::acquire_heavy_ml().await;
+    crate::mixed_language::transcribe_with_language_detection(app, audio_path, project_id).await
 }
 
 #[tauri::command]
@@ -83,6 +89,7 @@ pub async fn run_pipeline(
     app: AppHandle,
     video_path: String,
     normalize_slang: bool,
+    project_id: String,
 ) -> Result<PipelineResult, String> {
     // Speculative prefetch: hardware-encoder detection (see ffmpeg.rs)
     // does a handful of trial encodes and is cached for the app's
@@ -106,8 +113,8 @@ pub async fn run_pipeline(
         return Ok(PipelineResult { words: vec![], detected_language: None });
     }
 
-    let audio_path = extract_audio(&app, &video_path).await?;
-    let result = transcribe_with_auto_language(&app, &audio_path).await;
+    let audio_path = extract_audio(&app, &video_path, &project_id).await?;
+    let result = transcribe_with_auto_language(&app, &audio_path, &project_id).await;
     let _ = tokio::fs::remove_file(&audio_path).await;
     let (mut words, detected_language) = result?;
 
@@ -125,15 +132,28 @@ pub async fn run_pipeline(
 
 /// Transcribes an already-extracted audio file directly -- no ffmpeg
 /// extraction step, unlike `run_pipeline`. Used to get real word-level
-/// timestamps for a generated/uploaded voiceover (a WAV file already) so
-/// its captions can match what it actually says, instead of continuing to
-/// burn the original video's own transcript once the voiceover has
-/// replaced its audio. Both STT engines already handle arbitrary input
-/// sample rates internally (same as they already do for ffmpeg-extracted
-/// audio), so no resampling step is needed here even though Piper (22050Hz)
-/// and MMS-TTS (16000Hz) output different rates.
+/// timestamps for a generated/uploaded/mic-recorded voiceover (a WAV file
+/// already) so its captions can match what it actually says, instead of
+/// continuing to burn the original video's own transcript once the
+/// voiceover has replaced its audio. Both STT engines already handle
+/// arbitrary input sample rates internally (same as they already do for
+/// ffmpeg-extracted audio), so no resampling step is needed here even
+/// though Piper (22050Hz) and MMS-TTS (16000Hz) output different rates.
+///
+/// Deliberately does NOT go through `transcribe_with_auto_language` (the
+/// video-oriented, chop-into-many-small-segments language detector
+/// `run_pipeline` uses) -- every caller of this command hands it a single
+/// speaker's single continuous take (a voiceover recording, never a
+/// multi-speaker video), which is exactly the case
+/// `transcribe_solo_recording_with_language_detection` exists for. See its
+/// own doc comment for the real, on-device bug this replaced (a genuinely
+/// Tamil mic recording silently mis-routed to the English transcriber and
+/// coming back empty).
 #[tauri::command]
-pub async fn transcribe_audio_file(app: AppHandle, audio_path: String) -> Result<PipelineResult, String> {
-    let (words, detected_language) = transcribe_with_auto_language(&app, Path::new(&audio_path)).await?;
+pub async fn transcribe_audio_file(app: AppHandle, audio_path: String, project_id: String) -> Result<PipelineResult, String> {
+    let _permit = crate::concurrency::acquire_heavy_ml().await;
+    let (words, detected_language) =
+        crate::mixed_language::transcribe_solo_recording_with_language_detection(&app, Path::new(&audio_path), &project_id)
+            .await?;
     Ok(PipelineResult { words, detected_language })
 }

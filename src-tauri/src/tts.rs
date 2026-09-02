@@ -43,7 +43,13 @@ pub const TTS_ENV_NAME: &str = "tts";
 
 static TTS_PREFIX_CACHE: tokio::sync::OnceCell<PathBuf> = tokio::sync::OnceCell::const_new();
 
-async fn resolve_tts_prefix() -> Result<PathBuf, String> {
+/// `pub(crate)` -- `music_gen.rs` reuses this directly rather than
+/// duplicating conda-env resolution, since MusicGen generation lives in
+/// this exact same "tts" env (already has `torch`+`transformers`+`scipy`,
+/// which is all it needs too). Its own probe (`import piper, transformers`)
+/// still passes for that use -- it's just checking the env is real and has
+/// the shared dependency, not that every caller imports every package.
+pub(crate) async fn resolve_tts_prefix() -> Result<PathBuf, String> {
     let prefix = TTS_PREFIX_CACHE
         .get_or_try_init(|| async {
             let conda = crate::conda_util::resolve_conda_env(
@@ -58,11 +64,11 @@ async fn resolve_tts_prefix() -> Result<PathBuf, String> {
     Ok(prefix.clone())
 }
 
-fn python_exe(prefix: &Path) -> PathBuf {
+pub(crate) fn python_exe(prefix: &Path) -> PathBuf {
     prefix.join("python.exe")
 }
 
-fn tts_script_path(name: &str) -> PathBuf {
+pub(crate) fn tts_script_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tts").join(name)
 }
 
@@ -403,6 +409,14 @@ pub async fn generate_voiceover(
     let voice_ref = resolve_voice_reference(&app, video_path.as_deref()).await;
 
     let output_path = unique_temp_path("voiceover", "wav");
+
+    // Held through synthesis AND voice cloning below (both load their own
+    // model into memory per call -- OpenVoice for cloning, Piper/MMS-TTS
+    // for synthesis) -- one acquire for the whole heavy section, not a
+    // second acquire-drop-reacquire around cloning, which would let
+    // another queued caller's synthesis start mid-function and interleave
+    // with this call's own model loads.
+    let _permit = crate::concurrency::acquire_heavy_ml().await;
 
     let result_path = if language == "en" {
         synthesize_english(&app, text, voice_ref.english_voice_id, &output_path, preset.piper_length_scale).await?

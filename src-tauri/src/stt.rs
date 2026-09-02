@@ -94,6 +94,20 @@ fn stt_script_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stt").join(name)
 }
 
+/// Exposes this module's resolved "stt" conda env python + script-path
+/// helpers to `streaming_stt.rs`'s persistent live-dictation worker, which
+/// needs to spawn its own long-running script (`live_worker.py`) in the
+/// exact same environment every other STT call here already uses, without
+/// duplicating the conda resolution/caching logic.
+pub(crate) async fn stt_python_exe() -> Result<PathBuf, String> {
+    let prefix = resolve_stt_prefix().await?;
+    Ok(python_exe(&prefix))
+}
+
+pub(crate) fn live_worker_script_path() -> PathBuf {
+    stt_script_path("live_worker.py")
+}
+
 /// Where a converted (CTranslate2, int8) Tamil Whisper checkpoint for
 /// `language` is expected to live. Not bundled (large, per-language) — see
 /// `resources/stt-models/README.md` for the download+convert steps. Checks,
@@ -118,6 +132,16 @@ fn indic_model_dir(app: &AppHandle, language: &str) -> PathBuf {
     PathBuf::from(home).join(".reels-caption-app").join("stt-models").join(language)
 }
 
+/// `Some(dir)` only if a converted Tamil checkpoint is actually present --
+/// used by `streaming_stt.rs`'s persistent worker to decide at startup
+/// whether it can serve Tamil transcription requests at all, the same
+/// "Tamil is optional" gating `transcribe_and_align` already does via
+/// `is_supported_language_code`/the model-dir existence check below.
+pub(crate) fn tamil_model_dir_if_available(app: &AppHandle) -> Option<PathBuf> {
+    let dir = indic_model_dir(app, "ta");
+    dir.exists().then_some(dir)
+}
+
 #[derive(Debug, Deserialize)]
 struct SttWord {
     word: String,
@@ -134,11 +158,12 @@ struct SttOutput {
 async fn run_stt_script(
     app: &AppHandle,
     args: Vec<String>,
+    project_id: &str,
 ) -> Result<SttOutput, String> {
     let prefix = resolve_stt_prefix().await?;
     let python = python_exe(&prefix);
 
-    emit_progress(app, PROGRESS_EVENT, "transcribing", Some(0.0), None);
+    emit_progress(app, PROGRESS_EVENT, project_id, "transcribing", Some(0.0), None);
 
     let mut child = Command::new(&python)
         .args(&args)
@@ -187,17 +212,17 @@ async fn run_stt_script(
         return Err(format!("STT engine failed: {stderr_text}"));
     }
 
-    emit_progress(app, PROGRESS_EVENT, "transcribing", Some(100.0), None);
+    emit_progress(app, PROGRESS_EVENT, project_id, "transcribing", Some(100.0), None);
 
     let last_line = stdout_text.lines().last().unwrap_or_default();
     serde_json::from_str(last_line).map_err(|e| format!("Couldn't parse STT output: {e} (raw: {stdout_text})"))
 }
 
-async fn transcribe_english(app: &AppHandle, audio_path: &Path) -> Result<SttOutput, String> {
-    run_stt_script(app, vec![cli_path(&stt_script_path("parakeet_transcribe.py")), cli_path(audio_path)]).await
+async fn transcribe_english(app: &AppHandle, audio_path: &Path, project_id: &str) -> Result<SttOutput, String> {
+    run_stt_script(app, vec![cli_path(&stt_script_path("parakeet_transcribe.py")), cli_path(audio_path)], project_id).await
 }
 
-async fn transcribe_indic(app: &AppHandle, audio_path: &Path, language: &str) -> Result<SttOutput, String> {
+async fn transcribe_indic(app: &AppHandle, audio_path: &Path, language: &str, project_id: &str) -> Result<SttOutput, String> {
     let model_dir = indic_model_dir(app, language);
     if !model_dir.exists() {
         return Err(format!(
@@ -216,6 +241,7 @@ async fn transcribe_indic(app: &AppHandle, audio_path: &Path, language: &str) ->
             "--model-dir".to_string(),
             cli_path(&model_dir),
         ],
+        project_id,
     )
     .await
 }
@@ -333,11 +359,12 @@ pub async fn transcribe_and_align(
     app: &AppHandle,
     audio_path: &Path,
     language: &str,
+    project_id: &str,
 ) -> Result<(Vec<WordTimestamp>, Option<String>), String> {
     let output = if language == "en" {
-        transcribe_english(app, audio_path).await?
+        transcribe_english(app, audio_path, project_id).await?
     } else if INDIC_LANGUAGES.iter().any(|(code, _)| *code == language) {
-        transcribe_indic(app, audio_path, language).await?
+        transcribe_indic(app, audio_path, language, project_id).await?
     } else {
         return Err(format!(
             "Unsupported language code '{language}' — this pipeline supports English (en) and: {}",
