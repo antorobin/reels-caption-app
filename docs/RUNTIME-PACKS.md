@@ -49,10 +49,10 @@ libs, and the CUDA `.dll`s in a CPU build are all removable (~300 MB off
 
 ## Two installers
 
-| | Bundles | MSI size | How |
+| | Bundles | Size | How |
 |---|---|---|---|
-| **Slim** (default) | app + fonts only | ~20 MB | `npm run build:slim` |
-| **Full** (offline) | whole runtime | ~2–3 GB | populate resource dirs, then `npm run build:full` |
+| **Slim** (default, per OS) | app + fonts only | ~6 MB (Windows, measured) | `npm run build:slim` |
+| **Full** (offline, Windows) | whole runtime | ~2–3 GB | populate resource dirs, then `npm run build:full` |
 
 The slim installer ships nothing heavy; `runtime_fetch.rs` downloads the
 components on first launch (`tier: "core"`) and on first use of a feature
@@ -65,10 +65,17 @@ Driven by `src-tauri/components.json` — compiled in as the baseline,
 overridden at runtime by a hosted copy at `manifest_url`. Each component:
 
 ```
-{ id, tier: "core"|"on-demand", version, url, sha256, size,
+{ id, platform: "windows-x64"|"macos-arm64"|"macos-x64"|"linux-x64",
+  tier: "core"|"on-demand", version, url, sha256, size,
   unpack_to,          # relative to ~/.reels-caption-app/runtime/
   needed_for: [...] }  # feature ids, for the download-gate copy
 ```
+
+One entry per `(id, platform)`. `runtime_fetch.rs` filters to the current
+host; a platform with no entries behaves like the pre-pack slim build
+(features that need a runtime error until packs exist). The committed
+manifest lists only `windows-x64`; `pack-components.mjs --platform <p>`
+synthesises the others from it, and CI runs one leg per OS.
 
 | Component | unpack_to | Archive contents | Compressed |
 |---|---|---|---|

@@ -6,22 +6,27 @@
 # and tauri.conf.json's bundle.resources) so caption transcription works
 # with zero setup.
 #
-# Every package here publishes a prebuilt win_amd64 wheel -- installing
-# with `--only-binary=:all:` must succeed with no compiler. If it doesn't,
-# that's the signal a version needs bumping, not that conda is required.
+# VERIFIED: `build-python-runtime.mjs --pack=core` on Windows / CPython
+# 3.11.11 resolves every one of these to a prebuilt win_amd64 wheel with
+# no compiler, and `python.exe -c "import onnx_asr, faster_whisper"` from
+# the pruned tree passes. Pruned size ~330 MB.
 #
-# Pin to whatever your known-good conda `stt` env reports:
-#   conda run -n stt python -m pip freeze
-# and paste the exact `==` versions below before building a release pack.
-
+# Direct deps + the transitives worth pinning so a rebuild can't drift:
 faster-whisper==1.1.0
 onnx-asr[cpu,hub]==0.6.0
 soundfile==0.12.1
-
-# Transitive, pinned explicitly so a pack rebuild can't drift the runtime:
 onnxruntime==1.20.1
 ctranslate2==4.5.0
 huggingface-hub==0.27.1
 numpy==2.2.1
 av==13.1.0
 tokenizers==0.21.0
+
+# Fully resolved (from the verified build), for reference -- add as pins
+# if you want a byte-reproducible pack:
+#   certifi 2026.7.22, cffi 2.1.1, charset-normalizer 3.5.1, colorama 0.4.6,
+#   coloredlogs 15.0.1, filelock 3.32.5, flatbuffers 25.12.19,
+#   fsspec 2026.7.0, humanfriendly 10.0, idna 3.19, mpmath 1.3.0,
+#   packaging 26.3, protobuf 7.36.1, pycparser 3.0, pyreadline3 3.5.6,
+#   pyyaml 6.0.3, requests 2.34.2, sympy 1.14.0, tqdm 4.70.0,
+#   typing-extensions 4.16.0, urllib3 2.7.0

@@ -2185,8 +2185,11 @@ produces every relevant format for whichever platform runs it.
 npm run build:slim
 ```
 Output: `src-tauri/target/release/bundle/msi/KraftReel.App_0.2.0_x64_en-US.msi`
-(~20 MB). The app is inert until `components.json`'s asset URLs/checksums
-are published by the release pipeline — see `docs/RUNTIME-PACKS.md`.
+(~6 MB, measured). `release.yml` builds this per OS (`.msi` / `.dmg` /
+`.deb` + `.AppImage`). The app is inert until `components.json`'s asset
+URLs/checksums are published by the pipeline — Windows packs first;
+macOS/Linux packs slot into the same manifest by platform (see
+`docs/RUNTIME-PACKS.md`).
 
 **Full installer (offline).** Bundles the whole runtime, no first-run
 download. Populate the resource dirs first:

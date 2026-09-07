@@ -62,8 +62,16 @@ ship the DLLs, or accept two copies of a *small* static binary.
 
 ## How to actually build it
 
-Cross-compiling ffmpeg with these libs from scratch is a project. Use one
-of:
+**`.github/workflows/ffmpeg-min.yml`** does exactly this — a manual-dispatch
+MSYS2 build on `windows-latest` with `mingw-w64-x86_64-{x264,libass,rubberband}`
+and the `configure` line below, publishing `ffmpeg.exe`/`ffprobe.exe` as a
+`ffmpeg-min-windows-x64.tar.gz` asset on a standing `ffmpeg-min`
+pre-release. The Release workflow's `components` job downloads that in
+preference to BtbN. It needs one validation run (static-link flags may
+need a tweak); the `-filters`/`-encoders` check at the end fails loudly if
+a required piece is missing.
+
+Alternatives if you'd rather not use that workflow:
 
 1. **[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)** — fork
    it, edit `scripts.d/` to add `librubberband` and swap the addins list

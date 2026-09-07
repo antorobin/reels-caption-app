@@ -1,23 +1,21 @@
-# Cuts a GitHub Release on a version tag: the slim installer, the runtime
-# component packs it downloads at first run, and (for air-gapped users)
-# the fully-bundled installer.
+# Cuts a GitHub Release on a version tag: the slim installer for each OS,
+# the runtime component packs it downloads at first run, and (for
+# air-gapped users) the fully-bundled Windows installer.
 #
 # Flow:
-#   slim        -> tauri-action builds the ~6 MB MSI (default tauri.conf.json
-#                  bundles app + fonts only), signs it, CREATES the release,
-#                  uploads the MSI + latest.json for the OTA updater.
-#   components  -> builds the Python envs + a librubberband-capable ffmpeg +
-#                  the LLM pack, runs pack-components.mjs (tarballs + SHA-256
-#                  + a filled components.json pinned to THIS release's tag),
-#                  uploads them all. runtime_fetch.rs fetches these.
-#   full        -> the same app bundled with the whole runtime, uploaded as
-#                  KraftReel-Full-<tag>-x64.msi.
+#   slim        -> tauri-action builds the small installer per OS (default
+#                  tauri.conf.json bundles app + fonts only), signs it,
+#                  CREATES the release, uploads the installer + latest.json.
+#   components  -> builds the Python envs + a librubberband ffmpeg + the
+#                  LLM pack, runs pack-components.mjs (tarballs + SHA-256 +
+#                  a components.json with URLs pinned to THIS tag), uploads
+#                  them. runtime_fetch.rs fetches these. Windows-x64 only
+#                  for now; the manifest / resolver already key on
+#                  platform, so macos/linux legs slot in later.
+#   full        -> the Windows app bundled with the whole runtime, uploaded
+#                  as KraftReel-Full-<tag>-x64.msi.
 #
-# Windows-only for now: the component packs are win-x64. macOS/Linux slim
-# installers need their own packs -- a follow-up.
-#
-# One-time repo secrets (Settings -> Secrets and variables -> Actions),
-# same as before -- the signing key stays out of the repo by design:
+# One-time repo secrets (Settings -> Secrets and variables -> Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of the tauri signer key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  only if the key has a password
 #
@@ -36,16 +34,28 @@ permissions:
   contents: write
 
 env:
-  # components.json points here so it's pinned to this exact release, not
-  # whatever /latest/ resolves to mid-rollout.
   RELEASE_BASE: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
 
 jobs:
   # ---------------------------------------------------------------- slim --
   slim:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+          - platform: macos-latest
+          - platform: ubuntu-22.04
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Linux deps (webview + tray + audio capture)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -55,8 +65,7 @@ jobs:
           workspaces: src-tauri
       - run: npm ci
 
-      # No `fetch-resources` here -- the slim installer bundles nothing
-      # heavy. The default tauri.conf.json's bundle.resources is just fonts.
+      # No fetch-resources -- the slim installer bundles nothing heavy.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,12 +75,11 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "KraftReel.App ${{ github.ref_name }}"
           releaseBody: |
-            Slim installer (~6 MB) — the speech/media runtime downloads on first launch.
-            KraftReel-Full-*.msi bundles everything for offline installs.
+            Slim installer — the speech/media runtime downloads on first launch.
+            KraftReel-Full-*.msi bundles everything for offline installs (Windows).
             Installed copies update themselves via latest.json.
           releaseDraft: false
           prerelease: false
-          args: --bundles msi
 
   # ---------------------------------------------------------- components --
   components:
@@ -85,35 +93,40 @@ jobs:
       - run: npm ci
 
       # LLM (llama.cpp + Qwen gguf) and the Piper voices come from the
-      # existing dev-resources archive; ffmpeg from it too, then overwritten.
+      # existing dev-resources archive.
       - name: Fetch LLM + Piper resources
         run: npm run fetch-resources
 
-      # A real prebuilt ffmpeg that includes librubberband (tts.rs's
-      # emotion pitch-shift needs it) + libass + libx264 -- stock
-      # gyan.dev/BtbN "essentials" builds omit rubberband. ~90 MB static,
-      # vs the 242 MB full build fetch-resources ships. A from-source
-      # --disable-everything build (docs/MINIMAL-FFMPEG.md) can shave it
-      # further later.
-      - name: Swap in a librubberband ffmpeg
+      # Prefer the trimmed static build from the ffmpeg-min workflow;
+      # fall back to BtbN's ~90 MB win64-gpl (also has librubberband).
+      - name: Provide a librubberband ffmpeg
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          curl -fL -o ff.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
-          7z x ff.zip -off >/dev/null
-          d=$(find ff -maxdepth 1 -type d -name 'ffmpeg-*')
-          cp "$d/bin/ffmpeg.exe" "$d/bin/ffprobe.exe" src-tauri/resources/bin/
-          ./src-tauri/resources/bin/ffmpeg.exe -hide_banner -filters | grep -E 'rubberband|ass ' || (echo "ffmpeg missing a required filter" && exit 1)
+          if gh release download ffmpeg-min --pattern 'ffmpeg-min-windows-x64.tar.gz' -O ffmin.tar.gz 2>/dev/null; then
+            echo "using ffmpeg-min"
+            tar -xzf ffmin.tar.gz -C src-tauri/resources/bin
+          else
+            echo "ffmpeg-min not published yet -- using BtbN win64-gpl"
+            curl -fL -o ff.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+            7z x ff.zip -off >/dev/null
+            d=$(find ff -maxdepth 1 -type d -name 'ffmpeg-*')
+            cp "$d/bin/ffmpeg.exe" "$d/bin/ffprobe.exe" src-tauri/resources/bin/
+          fi
+          ./src-tauri/resources/bin/ffmpeg.exe -hide_banner -filters | grep -E ' rubberband| ass ' \
+            || (echo "ffmpeg missing a required filter" && exit 1)
 
       - name: Build the Python runtime envs
         run: node scripts/build-python-runtime.mjs --pack=all
 
       - name: Pack components
-        run: node scripts/pack-components.mjs --out dist/components --version ${{ github.ref_name }} --release-base ${{ env.RELEASE_BASE }}
+        run: node scripts/pack-components.mjs --out dist/components --platform windows-x64 --version ${{ github.ref_name }} --release-base ${{ env.RELEASE_BASE }}
 
       # Archives first, then the manifest -- so a client that reads
       # components.json never points at an asset that isn't up yet.
-      - name: Upload component archives
+      - name: Upload
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

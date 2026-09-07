@@ -34,10 +34,31 @@ const EMBEDDED_MANIFEST: &str = include_str!("../components.json");
 /// manifest) install without verification -- local testing only.
 const ALLOW_UNVERIFIED_ENV: &str = "REELS_CAPTION_APP_ALLOW_UNVERIFIED_COMPONENTS";
 
+/// `windows-x64` | `macos-arm64` | `macos-x64` | `linux-x64` for the host
+/// this build is running on. The manifest carries one `Component` entry
+/// per (id, platform); everything below filters to this.
+pub fn current_platform() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", _) => "windows-x64",
+        ("macos", "aarch64") => "macos-arm64",
+        ("macos", _) => "macos-x64",
+        ("linux", _) => "linux-x64",
+        _ => "unknown",
+    }
+}
+
+fn default_platform() -> String {
+    "windows-x64".to_string()
+}
+
 #[derive(Deserialize, Clone)]
 pub struct Component {
     pub id: String,
     pub tier: String, // "core" | "on-demand"
+    /// Which host this entry is for. Defaulted for back-compat with a
+    /// manifest that predates multi-platform packs.
+    #[serde(default = "default_platform")]
+    pub platform: String,
     pub version: String,
     pub url: String,
     #[serde(default)]
@@ -125,22 +146,26 @@ fn to_status(c: &Component) -> ComponentStatus {
     }
 }
 
-/// Every component and whether it's installed -- drives the Settings
-/// "Manage components" pane and the per-feature download gates.
+/// Every component for this host and whether it's installed -- drives the
+/// Settings "Manage components" pane and the per-feature download gates.
 #[tauri::command]
 pub async fn list_runtime_components() -> Vec<ComponentStatus> {
-    load_manifest().await.components.iter().map(to_status).collect()
+    let here = current_platform();
+    load_manifest().await.components.iter().filter(|c| c.platform == here).map(to_status).collect()
 }
 
-/// The `tier: "core"` components not yet installed -- what the first-run
-/// setup screen downloads before the editor opens. Empty vec => ready.
+/// The `tier: "core"` components for this host not yet installed -- what
+/// the first-run setup screen downloads before the editor opens. Empty
+/// vec => ready (also the case on a platform with no packs published
+/// yet, which then behaves like the pre-pack slim build).
 #[tauri::command]
 pub async fn missing_core_components() -> Vec<ComponentStatus> {
+    let here = current_platform();
     load_manifest()
         .await
         .components
         .iter()
-        .filter(|c| c.tier == "core" && !is_installed(c))
+        .filter(|c| c.platform == here && c.tier == "core" && !is_installed(c))
         .map(to_status)
         .collect()
 }
@@ -154,12 +179,13 @@ fn stable_part_path(id: &str) -> PathBuf {
 /// the component id as the `project_id` slot so the UI can route them.
 #[tauri::command]
 pub async fn download_runtime_component(app: AppHandle, id: String) -> Result<(), String> {
+    let here = current_platform();
     let manifest = load_manifest().await;
     let component = manifest
         .components
         .iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| format!("Unknown runtime component: {id}"))?
+        .find(|c| c.id == id && c.platform == here)
+        .ok_or_else(|| format!("No '{id}' runtime component for this platform ({here})"))?
         .clone();
 
     if is_installed(&component) {

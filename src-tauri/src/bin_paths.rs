@@ -33,9 +33,10 @@ static FFMPEG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static FFPROBE_PATH: OnceLock<PathBuf> = OnceLock::new();
 static FONTS_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// A downloaded runtime binary at `~/.reels-caption-app/runtime/bin/<name>`,
-/// if present — takes precedence over a bundled copy.
-fn downloaded_bin(name: &str) -> Option<PathBuf> {
+/// A downloaded runtime binary at `~/.reels-caption-app/runtime/bin/<stem>`
+/// (`.exe` on Windows), if present — takes precedence over a bundled copy.
+fn downloaded_bin(stem: &str) -> Option<PathBuf> {
+    let name = if cfg!(windows) { format!("{stem}.exe") } else { stem.to_string() };
     let p = crate::runtime_fetch::runtime_dir().join("bin").join(name);
     p.exists().then_some(p)
 }
@@ -86,11 +87,11 @@ pub fn init(app: &AppHandle) {
 /// resolved bundled/PATH value (bare `ffmpeg` if `init` hasn't run, e.g.
 /// unit tests).
 pub fn ffmpeg_path() -> PathBuf {
-    downloaded_bin("ffmpeg.exe").unwrap_or_else(|| FFMPEG_PATH.get_or_init(|| PathBuf::from("ffmpeg")).clone())
+    downloaded_bin("ffmpeg").unwrap_or_else(|| FFMPEG_PATH.get_or_init(|| PathBuf::from("ffmpeg")).clone())
 }
 
 pub fn ffprobe_path() -> PathBuf {
-    downloaded_bin("ffprobe.exe").unwrap_or_else(|| FFPROBE_PATH.get_or_init(|| PathBuf::from("ffprobe")).clone())
+    downloaded_bin("ffprobe").unwrap_or_else(|| FFPROBE_PATH.get_or_init(|| PathBuf::from("ffprobe")).clone())
 }
 
 pub fn fonts_dir() -> PathBuf {

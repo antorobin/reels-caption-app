@@ -1,0 +1,100 @@
+# Builds a size-trimmed, static ffmpeg/ffprobe for win64 from source --
+# `--disable-everything` plus exactly the codecs/filters KraftReel calls
+# (see docs/MINIMAL-FFMPEG.md), including librubberband, which stock
+# prebuilt "essentials" builds omit and tts.rs's emotion pitch-shift
+# needs.
+#
+# Runs on manual dispatch only (the binaries change rarely). It publishes
+# `ffmpeg.exe` / `ffprobe.exe` as assets on a standing `ffmpeg-min`
+# pre-release; the Release workflow's `components` job downloads them from
+# there in preference to the ~90 MB BtbN win64-gpl build.
+#
+# STATUS: needs one validation run -- static linking against MSYS2 mingw
+# libs can need an extra `-static-libgcc`/`-static-libstdc++` or a couple
+# of bundled runtime DLLs. The `-version` + `-filters` check at the end
+# fails loudly if a required piece is missing.
+
+name: ffmpeg-min
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_ref:
+        description: "ffmpeg git tag to build"
+        default: "n7.1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel git
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-x264
+            mingw-w64-x86_64-libass
+            mingw-w64-x86_64-rubberband
+
+      - name: Clone ffmpeg
+        run: git clone --depth 1 --branch "${{ inputs.ffmpeg_ref }}" https://git.ffmpeg.org/ffmpeg.git ff
+
+      - name: Configure (disable-everything + KraftReel's set)
+        working-directory: ff
+        run: |
+          ./configure \
+            --prefix=/tmp/out \
+            --pkg-config-flags=--static \
+            --extra-ldflags="-static -static-libgcc -static-libstdc++" \
+            --disable-shared --enable-static \
+            --disable-everything --disable-doc --disable-ffplay --disable-debug \
+            --disable-network --disable-sdl2 --disable-autodetect \
+            --enable-gpl --enable-version3 \
+            --enable-libx264 --enable-libass --enable-librubberband \
+            --enable-encoder=libx264,aac,pcm_s16le,pcm_f32le \
+            --enable-decoder=h264,hevc,vp8,vp9,mpeg4,mjpeg,aac,mp3,flac,opus,vorbis,pcm_s16le,pcm_s16be,pcm_f32le,pcm_u8 \
+            --enable-demuxer=mov,matroska,avi,wav,mp3,aac,image2,flac,ogg \
+            --enable-muxer=mp4,mov,matroska,webm,wav,mp3,aac,image2,ipod,null \
+            --enable-parser=h264,hevc,aac,vp8,vp9,mpeg4video,mjpeg,flac,opus,vorbis \
+            --enable-bsf=h264_mp4toannexb,aac_adtstoasc,extract_extradata \
+            --enable-protocol=file,pipe \
+            --enable-filter=ass,subtitles,scale,crop,fade,eq,fps,zoompan,format,overlay,setpts,concat,colorchannelmixer,aresample,aformat,anull,asetpts,loudnorm,silenceremove,silencedetect,afftdn,highpass,volume,adelay,amix,apad,atrim,pan,rubberband,null,copy,trim \
+            --enable-small
+
+      - name: Build
+        working-directory: ff
+        run: make -j"$(nproc)" && make install
+
+      - name: Verify + collect
+        run: |
+          mkdir -p out
+          cp /tmp/out/bin/ffmpeg.exe /tmp/out/bin/ffprobe.exe out/
+          ldd out/ffmpeg.exe | (grep -i mingw && echo "WARNING: non-static mingw deps above" || true)
+          ./out/ffmpeg.exe -hide_banner -version | head -1
+          ./out/ffmpeg.exe -hide_banner -filters   | grep -E ' rubberband| ass | loudnorm| zoompan| silenceremove' || (echo "missing a required filter" && exit 1)
+          ./out/ffmpeg.exe -hide_banner -encoders  | grep -E ' libx264| aac ' || (echo "missing a required encoder" && exit 1)
+          du -h out/ffmpeg.exe out/ffprobe.exe
+
+      - name: Publish to the ffmpeg-min pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tar -czf ffmpeg-min-windows-x64.tar.gz -C out .
+          sha256sum ffmpeg-min-windows-x64.tar.gz | tee ffmpeg-min-windows-x64.tar.gz.sha256
+          gh release view ffmpeg-min >/dev/null 2>&1 || \
+            gh release create ffmpeg-min --prerelease --title "Minimal ffmpeg (rolling)" --notes "Static win64 ffmpeg/ffprobe, disable-everything + KraftReel's codec/filter set + librubberband. Rebuilt on demand."
+          gh release upload ffmpeg-min ffmpeg-min-windows-x64.tar.gz ffmpeg-min-windows-x64.tar.gz.sha256 --clobber

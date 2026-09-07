@@ -41,14 +41,22 @@ const OUT = resolve(ROOT, args.out || "dist/components");
 const VERSION = args.version || new Date().toISOString().slice(0, 10);
 const RELEASE_BASE =
   args["release-base"] || "https://github.com/antorobin/reels-caption-app/releases/latest/download";
+// Which platform's entries to (re)build. The manifest carries one entry
+// per (id, platform); this run touches only the matching ones.
+const PLATFORM =
+  args.platform ||
+  { win32: "windows-x64", darwin: process.arch === "arm64" ? "macos-arm64" : "macos-x64", linux: "linux-x64" }[
+    process.platform
+  ];
 
-// id -> pack recipe. `entries` are relative to `cwd`; archive contents
-// land at the archive root so `runtime_fetch`'s `unpack_to` maps cleanly.
+// id -> pack recipe. `base` + `-<platform>.tar.gz` is the asset name.
+// `entries` are relative to `cwd`; archive contents land at the archive
+// root so `runtime_fetch`'s `unpack_to` maps cleanly.
 const PACKS = {
-  ffmpeg: { archive: "ffmpeg-win-x64.tar.gz", cwd: join(RES, "bin"), entries: ["."] },
-  "python-stt": { archive: "python-stt-win-x64.tar.gz", cwd: join(RES, "python"), entries: ["stt"] },
+  ffmpeg: { base: "ffmpeg", cwd: join(RES, "bin"), entries: ["."] },
+  "python-stt": { base: "python-stt", cwd: join(RES, "python"), entries: ["stt"] },
   "python-voice": {
-    archive: "python-voice-win-x64.tar.gz",
+    base: "python-voice",
     // two source roots -> stage a temp tree so the archive is one flat unpack
     staged: [
       [join(RES, "python"), ["tts", "media-ai", "voice-clone"]],
@@ -56,7 +64,7 @@ const PACKS = {
     ],
     archiveRootEntries: ["python", "tts-models"],
   },
-  llm: { archive: "llm-qwen-0.5b-win-x64.tar.gz", cwd: join(RES, "llama"), entries: ["."] },
+  llm: { base: "llm-qwen-0.5b", cwd: join(RES, "llama"), entries: ["."] },
 };
 
 function sha256(file) {
@@ -74,13 +82,26 @@ mkdirSync(OUT, { recursive: true });
 const manifestPath = join(SRC_TAURI, "components.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 
+// The committed manifest only lists windows-x64. For another platform,
+// synthesize its entries from the windows ones (same id/tier/unpack_to/
+// needed_for; url/sha256/size get filled below).
+if (!manifest.components.some((c) => c.platform === PLATFORM)) {
+  const seed = manifest.components.filter((c) => c.platform === "windows-x64");
+  for (const c of seed) {
+    manifest.components.push({ ...c, platform: PLATFORM, url: "", sha256: "", size: 0 });
+  }
+}
+
+console.log(`Packing platform: ${PLATFORM}`);
 for (const c of manifest.components) {
+  if (c.platform !== PLATFORM) continue;
   const pack = PACKS[c.id];
   if (!pack) {
     console.warn(`! no pack recipe for component "${c.id}" — skipping`);
     continue;
   }
-  const archivePath = join(OUT, pack.archive);
+  const archiveName = `${pack.base}-${PLATFORM}.tar.gz`;
+  const archivePath = join(OUT, archiveName);
 
   if (pack.staged) {
     const stage = join(OUT, `_stage-${c.id}`);
@@ -104,10 +125,10 @@ for (const c of manifest.components) {
   const digest = await sha256(archivePath);
   const size = statSync(archivePath).size;
   c.version = VERSION;
-  c.url = `${RELEASE_BASE}/${pack.archive}`;
+  c.url = `${RELEASE_BASE}/${archiveName}`;
   c.sha256 = digest;
   c.size = size;
-  console.log(`${c.id.padEnd(14)} ${pack.archive}  ${(size / 1e6).toFixed(1)} MB  ${digest.slice(0, 16)}…`);
+  console.log(`${c.id.padEnd(14)} ${archiveName}  ${(size / 1e6).toFixed(1)} MB  ${digest.slice(0, 16)}…`);
 }
 
 writeFileSync(join(OUT, "components.json"), JSON.stringify(manifest, null, 2) + "\n");

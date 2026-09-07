@@ -1,19 +1,22 @@
-# "tts" environment -- Piper (English) + MMS-TTS (Indian languages)
-# voiceover synthesis, and MusicGen background-music generation
-# (music_gen.rs reuses this same env).
+# "tts" environment -- MMS-TTS (Indian-language voiceover) and MusicGen
+# background-music generation (music_gen.rs reuses this env).
 #
-# HEAVY env: pulls PyTorch (CPU). Not in the base MSI -- shipped in the
-# optional "voice & effects" pack (scripts/build-python-runtime.mjs
-# --pack=extras) and fetched on first use via the model_fetch.rs flow.
+# HEAVY env: PyTorch (CPU). Part of the optional "voice & effects" pack.
+# torch comes from PyTorch's own CPU index (the build script passes it).
 #
-# torch comes from PyTorch's own CPU index, not PyPI -- the build script
-# passes the extra index url. Pin to your known-good conda `tts` env:
-#   conda run -n tts python -m pip freeze
+# NOTE -- English Piper voiceover is NOT in this env. `piper-tts` pulls
+# `piper-phonemize`, which has no Windows wheel (verified: `--pack=all`
+# failed here with "No matching distribution found for
+# piper-phonemize~=1.1.0"). English Piper needs the native `piper` binary
+# bundled like ffmpeg -- a separate `piper` runtime component and a
+# `tts.rs` rework. Until then, English voiceover falls back to whatever
+# `tts.rs`'s `resolve_voice_reference` degrades to.
+#
+# Pin to a known-good `pip freeze` before a release pack.
 
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 torch==2.5.1+cpu
-piper-tts==1.2.0
 transformers==4.47.1
 scipy==1.15.0
 numpy==2.2.1

@@ -151,6 +151,9 @@ function pruneEnv(prefix) {
   for (const junk of ["pip", "setuptools", "pkg_resources", "_distutils_hack"]) {
     rmSync(join(sp, junk), { recursive: true, force: true });
   }
+  // Left dangling once _distutils_hack is gone; prints a harmless
+  // ModuleNotFoundError to stderr on every interpreter start otherwise.
+  rmSync(join(sp, "distutils-precedence.pth"), { force: true });
   rmSync(join(prefix, "Scripts"), { recursive: true, force: true });
   walkRemove(prefix, (name, isDir) => isDir && (name === "__pycache__" || name === "tests" || name === "test"));
 }
