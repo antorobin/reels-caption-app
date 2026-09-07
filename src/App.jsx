@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import AuthScreen from "./components/auth/AuthScreen.jsx";
+import RuntimeSetup from "./components/RuntimeSetup.jsx";
 import { defaultCaptionStyle } from "./components/CaptionStyleEditor.jsx";
 import { defaultTheme } from "./lib/themes.js";
 import { formatElapsed } from "./components/ProgressBar.jsx";
@@ -256,6 +257,19 @@ function App() {
   const setProjectHashtags = (v) => patchCurrentProject({ hashtags: v });
 
   const { user, loading: authLoading } = useAuth();
+
+  // Slim-installer first-run gate: `runtime_fetch.rs`'s `tier: "core"`
+  // components (minimal ffmpeg + the stt Python env) must be present
+  // before the editor is any use. `null` = still checking, `[]` = ready,
+  // a non-empty array = show <RuntimeSetup>. The full installer bundles
+  // these, so the check comes back `[]` there and nothing renders.
+  const [missingCore, setMissingCore] = useState(null);
+  useEffect(() => {
+    if (!user) return;
+    invoke("missing_core_components")
+      .then((missing) => setMissingCore(Array.isArray(missing) ? missing : []))
+      .catch(() => setMissingCore([])); // check failed -> don't trap the user on the setup screen
+  }, [user]);
 
   // Fetches this signed-in user's saved default caption style once per
   // sign-in, caching it at module scope (`cachedUserDefaultCaptionStyle`)
@@ -913,6 +927,18 @@ function App() {
 
   if (!user) {
     return <AuthScreen />;
+  }
+
+  if (missingCore === null) {
+    return (
+      <div className="container auth-screen">
+        <p className="subtitle">Loading…</p>
+      </div>
+    );
+  }
+
+  if (missingCore.length > 0) {
+    return <RuntimeSetup components={missingCore} onReady={() => setMissingCore([])} />;
   }
 
   return (

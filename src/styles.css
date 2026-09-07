@@ -2826,3 +2826,37 @@ footer {
   border-color: transparent;
   color: var(--shell-text-dim);
 }
+
+/* First-run runtime download gate (RuntimeSetup.jsx) */
+.runtime-setup-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.runtime-setup-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--shell-text-dim, #666);
+}
+.runtime-setup-item.is-active {
+  color: #111;
+  font-weight: 600;
+}
+.runtime-setup-item.is-done {
+  color: #2e7d32;
+}
+.runtime-setup-mark {
+  width: 1em;
+  text-align: center;
+  flex: none;
+}
+.runtime-setup-size {
+  color: #999;
+  font-weight: 400;
+  margin-left: 6px;
+}
