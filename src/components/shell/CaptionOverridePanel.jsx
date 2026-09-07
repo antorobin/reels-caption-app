@@ -18,12 +18,30 @@ import { formatTime } from "../../lib/time.js";
 // to "3s from the playhead"; a drag is precise but still worth double-
 // checking), so start/end are real editable number inputs here, not a
 // read-only label, clamped to `[0, duration]`.
-function CaptionOverridePanel({ range, duration, baseStyle, baseThemeId, existingOverrides, onApply, onCancel }) {
+//
+// Doubles as the *edit* panel for an existing override: pass its own
+// style/themeId as `baseStyle`/`baseThemeId` (the draft seeds from
+// whatever it should start looking like -- the project base style when
+// creating, the override's own current style when editing) and its own
+// index as `excludeIndex` so the overlap check doesn't flag the range
+// against itself. `onRemove` is only provided in edit mode, rendering an
+// extra destructive action alongside Cancel/Apply.
+function CaptionOverridePanel({
+  range,
+  duration,
+  baseStyle,
+  baseThemeId,
+  existingOverrides,
+  excludeIndex,
+  onApply,
+  onCancel,
+  onRemove,
+}) {
   const [draftStyle, setDraftStyle] = useState(() => ({ ...baseStyle }));
   const [draftThemeId, setDraftThemeId] = useState(baseThemeId || defaultTheme().id);
   const [start, setStart] = useState(range.start);
   const [end, setEnd] = useState(range.end);
-  const overlaps = overrideRangeOverlaps(start, end, existingOverrides);
+  const overlaps = overrideRangeOverlaps(start, end, existingOverrides, excludeIndex);
   const validRange = end > start;
 
   function clamp(value) {
@@ -76,6 +94,11 @@ function CaptionOverridePanel({ range, duration, baseStyle, baseThemeId, existin
       />
 
       <div className="caption-override-panel-actions">
+        {onRemove && (
+          <button type="button" className="caption-override-panel-remove" onClick={onRemove}>
+            Remove override
+          </button>
+        )}
         <button type="button" onClick={onCancel}>
           Cancel
         </button>

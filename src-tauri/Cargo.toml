@@ -126,16 +126,15 @@ cpal = "0.15"
 # C-toting dependency gets checked against a real `cargo build` up front
 # this time, not assumed to just work.
 rusqlite = { version = "0.32", features = ["bundled"] }
-# sqlite-vec: the project library's semantic search (library.rs's
-# `search_projects`) -- a real cosine-KNN virtual table extension, verified
-# directly against this exact rusqlite version via a standalone probe
-# before writing any code around it (same discipline as rusqlite itself,
-# above) -- a real, working `vec0` table with `distance_metric=cosine`
-# correctly ranked 3 test embeddings by actual similarity, not insertion
-# order. `zerocopy` is the crate sqlite-vec's own docs recommend for
-# passing `Vec<f32>` embeddings in without an extra copy.
-sqlite-vec = "0.1.9"
-zerocopy = "0.7"
+# FTS5 (library.rs's `search_projects`) needs no separate dependency --
+# confirmed directly via a standalone probe that it's already compiled
+# into this exact `rusqlite = { version = "0.32", features = ["bundled"] }`
+# build, no extra feature flag required. This replaced an earlier
+# `sqlite-vec` + `zerocopy` semantic-search integration (a real cosine-KNN
+# vector search, verified working the same way) -- removed, not just
+# unused, once full-text search was requested instead: no reason to keep
+# a second SQLite extension and its own embedding pipeline (embeddings.rs,
+# now also deleted) around once nothing calls into either anymore.
 
 [features]
 # this feature is used for production builds where `devPath` points to the filesystem

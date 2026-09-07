@@ -15,8 +15,8 @@
 //   mixed_language.rs), TTS voiceover generation (tts.rs), and MusicGen
 //   (music_gen.rs) each spawn a *fresh subprocess per call* that loads its
 //   own model into memory independently -- nothing is shared across calls
-//   the way llm.rs's/embeddings.rs's singleton servers already share one
-//   loaded model. Left unbounded, N concurrent calls means N full model
+//   the way llm.rs's own singleton server already shares one loaded
+//   model. Left unbounded, N concurrent calls means N full model
 //   loads stacked in RAM at once, on this app's own stated "RAM-
 //   constrained laptop" target hardware. Failure mode: OOM/swapping, a
 //   slow degradation, not a hard error.
@@ -31,11 +31,15 @@
 //   core count would be meaningless -- more cores don't buy more
 //   concurrent hardware encoder sessions.
 //
-// llm.rs (llama-server) and embeddings.rs (embed_server.py) deliberately
-// get NO semaphore here -- both are already singleton background HTTP
-// servers that naturally serialize concurrent requests one-at-a-time at
-// the HTTP layer. Adding a semaphore on top would just be a second,
-// subtly different queuing mechanism stacked on an already-correct one.
+// llm.rs (llama-server) deliberately gets NO semaphore here -- it's
+// already a singleton background HTTP server that naturally serializes
+// concurrent requests one-at-a-time at the HTTP layer. Adding a semaphore
+// on top would just be a second, subtly different queuing mechanism
+// stacked on an already-correct one. (An embedding server used to live
+// here too, for the project library's semantic search -- removed once
+// that search was replaced with SQLite's own FTS5, which runs
+// synchronously in-process and needs no server, semaphore, or queuing of
+// any kind.)
 
 use std::sync::OnceLock;
 use tokio::sync::{Semaphore, SemaphorePermit};

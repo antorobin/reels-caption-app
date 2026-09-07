@@ -25,7 +25,7 @@ function composeCaptionFromContentIdeas(ideas) {
 // ("Connect Instagram" vs "Schedule to Instagram") still runs the same way
 // -- it now just decides what the *modal's body* shows on open, which it
 // already did anyway.
-function ScheduleToInstagramButton({ open, onClose, videoPath, contentIdeas }) {
+function ScheduleToInstagramButton({ open, onClose, videoPath, contentIdeas, currentProjectId }) {
   const [hasConfig, setHasConfig] = useState(false);
   const [account, setAccount] = useState(null);
   const [connecting, setConnecting] = useState(false);
@@ -89,6 +89,15 @@ function ScheduleToInstagramButton({ open, onClose, videoPath, contentIdeas }) {
       if (mode === "now") {
         const result = await invoke("post_to_instagram_now", { videoPath, caption });
         setMessage(`Posted! Media id ${result.media_id}.`);
+        // Best-effort, same reasoning as ExportButton.jsx's own
+        // mark_project_exported call -- a failed status stamp shouldn't
+        // make an otherwise-successful post look like it failed. A
+        // *scheduled* post (the other branch below) deliberately doesn't
+        // stamp this yet -- scheduler.rs's own queue has no notion of
+        // "which project" a scheduled job came from, so there's no way to
+        // mark this project published only once that job actually fires
+        // later; a real, open gap, not something this call papers over.
+        if (currentProjectId) invoke("mark_project_published", { id: currentProjectId }).catch(() => {});
       } else {
         if (!whenLocal) {
           setError("Pick a date and time first.");

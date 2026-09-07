@@ -14,7 +14,7 @@ const VIDEO_FILTERS = [{ name: "Video", extensions: ["mp4", "mov", "mkv", "avi",
 // "Publish to Instagram" reuses ScheduleToInstagramButton's existing modal
 // unchanged (see its own doc comment) -- this menu just controls when it
 // opens instead of it owning a trigger button itself.
-function ExportButton({ lastBurnedPath, contentIdeas }) {
+function ExportButton({ lastBurnedPath, contentIdeas, currentProjectId }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [instagramOpen, setInstagramOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -31,6 +31,10 @@ function ExportButton({ lastBurnedPath, contentIdeas }) {
     setDownloading(true);
     try {
       await invoke("export_file", { source: lastBurnedPath, destination });
+      // Best-effort -- a project could be gone by the time this lands
+      // (deleted mid-export), and a failed status stamp shouldn't make an
+      // otherwise-successful export look like it failed.
+      if (currentProjectId) invoke("mark_project_exported", { id: currentProjectId }).catch(() => {});
     } catch (err) {
       setError(String(err));
     } finally {
@@ -76,6 +80,7 @@ function ExportButton({ lastBurnedPath, contentIdeas }) {
         onClose={() => setInstagramOpen(false)}
         videoPath={lastBurnedPath}
         contentIdeas={contentIdeas}
+        currentProjectId={currentProjectId}
       />
     </div>
   );

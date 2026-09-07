@@ -1206,6 +1206,799 @@ rendered frames before, during, and after the override — confirmed
 libass genuinely switches styles mid-video and reverts correctly, not
 just assumed from the generated ASS text.
 
+## 2.12. Live preview font-size scaling was wrong for vertical video (fixed)
+
+`VideoPreview.jsx` scaled caption font size for its live overlay by
+`displayWidth / 1920` — assuming the ASS script's `PlayResX=1920/
+PlayResY=1080` (16:9 landscape) coordinate space maps onto the video by
+*width*. Reels are vertical (9:16), so this assumption was wrong for the
+app's actual dominant use case, and the effect was severe, not cosmetic:
+burned two real test videos through libass with an identical style —
+one portrait 1080x1920, one ultra-wide 3840x1080 — and measured the
+actual rendered glyph height in the output frames. Both matched
+`video_height / PlayResY` (1080), **not** `video_width / PlayResX`
+(1920), regardless of which axis was larger than PlayRes. For a
+realistic vertical reel shown in the app's small preview column, the old
+formula produced an on-screen font roughly **3.16x too small** — small
+enough that captions needing to wrap in the real burned output usually
+just fit on one line in the live preview, which is exactly the report
+that led here ("the downloaded video wrapped correctly, the live preview
+didn't").
+
+Fixed by scaling against the video's own rendered on-screen *height*
+(`ASS_PLAY_RES_HEIGHT = 1080`) instead of width — the video element's
+native resolution cancels out of the math entirely this way (`scale =
+onscreen pixel height ÷ 1080`), so it's correct for any aspect ratio,
+not just vertical, without needing to know the source video's real
+pixel dimensions in JS at all.
+
+**A smaller, separate gap, flagged rather than silently left unfixed**:
+even at the now-correct font size, the exact word where a line breaks
+can still differ slightly between the live preview and the real burn —
+the browser's own CSS wrapping greedily fills each line to its max
+width, while the real burn's ASS `WrapStyle: 0` does "smart" wrapping
+that tries to balance line lengths (often keeping the top line shorter).
+Verified directly: burning the same long sentence on a real vertical
+video and comparing it (downscaled to the exact on-screen preview size)
+against the corrected CSS preview showed clearly comparable,
+proportionally-sized multi-line wrapping — a world away from the old
+single-line overflow — but not an identical line-by-line split. Closing
+that fully would mean re-implementing libass's specific balanced-wrap
+algorithm in JS (using measured text width, not just CSS's default
+fill-greedily behavior); not done here, since the font-size fix already
+resolves the reported issue's actual root cause.
+
+**Follow-up, same root cause, a second trigger**: the fix above still
+wasn't enough for the preview's own fullscreen button specifically —
+entering/exiting fullscreen changes the video's real rendered height
+dramatically (a ~240px-tall preview column vs. the full display), but
+nothing re-measured it there. The one `useEffect` re-measuring
+`clientHeight` only listens for `window resize`, and fullscreening *an
+element* via the Fullscreen API (rather than the whole browser window)
+doesn't reliably fire that event — so `displayHeight`, and therefore the
+caption font size, stayed stuck at the small preview's value even once
+blown up to fullscreen, reproducing the exact same "barely wraps because
+the font renders too small" symptom the height-based scale fix above
+was meant to close, just via a resize path nothing was listening on.
+Fixed by also re-measuring inside the existing `fullscreenchange`
+listener, after a short delay to let the transition's layout actually
+settle (reading `clientHeight` in the same tick the event fires can
+still reflect the pre-transition size in some browsers).
+
+## 2.13. Theme visibility/persistence UX + pin-and-stretch overrides
+
+Three related UX improvements, all in service of the same complaint:
+picking a theme (or an override) had no persistent, easy-to-find visual
+confirmation of what was actually applied.
+
+- **Selected-theme indicator on the card itself**: `CaptionStyleEditor.jsx`'s
+  theme grid now highlights whichever card matches the project's current
+  `captionThemeId` (a blue ring + checkmark), persisting across switching
+  projects and coming back — previously the grid gave no visual signal
+  at all about which theme (if any) a project was using; you had to
+  compare every field by eye or trust the small text label below the
+  grid. Matches by theme `id` alone, so it stays lit even once
+  hand-tweaked into a "(Custom)" variant of that theme.
+- **A second, always-visible location**: a new small panel just below
+  the transcript box (`TranscriptPanel.jsx`), showing the current
+  project's theme name (reusing `displayNameFor` — exported from
+  `CaptionStyleEditor.jsx` for this — so there's one source of truth for
+  the name, not two computations that could drift apart) and a "Change
+  theme" link that opens the style editor directly (`moreOptionsOpen`
+  was lifted from `MainPanel.jsx` up to `AppShell.jsx` so this sibling
+  component can trigger the same modal). Since `MoreOptionsModal`
+  remounts fresh each time it opens, it already always lands on the
+  "style" tab by default — no extra plumbing needed for that part.
+- **Pin-and-stretch for adding multiple per-portion overrides**: replaced
+  the single continuous drag-to-select gesture with a two-step flow —
+  click "📍 Pin a style override" (next to the Timeline's time label) to
+  drop a pin at the current playhead, then drag anywhere on the timeline
+  to stretch a range from that fixed point; releasing opens the same
+  `CaptionOverridePanel` as before. A direct drag with no pin still works
+  too, as a fast path. **Verified with real simulated mouse events**, not
+  just read from the code: built a standalone test harness reproducing
+  the exact state machine, confirmed a drag starting far from the pin's
+  own position still produces a committed range anchored at the pin (not
+  at the drag's own origin).
+
+## 2.14. Multiple pins + auto-suggested transition points
+
+Extends the pin-and-stretch flow above: any number of pins can be
+dropped at once (clicking "📍 Pin a style override" repeatedly, moving
+the playhead between clicks), but only one is ever *armed* — the fixed
+edge the next drag stretches from — so it's always unambiguous which
+pin a drag affects even with several sitting on the timeline together.
+Clicking an unarmed pin arms it; clicking the already-armed one removes
+it. Applying or removing the armed pin only ever touches that one pin —
+every other placed pin stays put for later.
+
+**Auto-suggested pins**, `suggestTransitionPoints` in `src/lib/captions.js`,
+combine four signals — all computed from data this app already has, no
+new backend analysis needed:
+- **Speaker changes** (diarization) — a different speaker starting to talk.
+- **Silence/pause gaps** — reuses `VideoPreview.jsx`'s own established
+  "meaningful gap" threshold (0.6s; ≥1.5s is flagged as a "Long pause")
+  rather than inventing a second, inconsistent number for the same idea.
+- **Vocal-emphasis jumps** (prosody) — a jump into "high" intensity from
+  a lower one.
+- **Speaking-pace shifts** (new, proposed as a fourth signal alongside
+  the three above) — local words-per-second just before vs. just after
+  each word, purely from existing timestamps; a sudden speedup/slowdown
+  often marks a real tonal shift the other three signals can miss
+  entirely if speaker, pauses, and vocal emphasis all stay flat through
+  it. A known, accepted limitation: near the very end of a fast/slow run
+  (or the transcript's own end), the trailing window has less data to
+  compare against, which can occasionally mislabel the direction of a
+  real pace change — a real, minor artifact of any windowed heuristic,
+  not a bug, and it doesn't affect *that* a transition gets flagged there.
+
+Candidates from different signals within 0.5s of each other are merged
+into one suggestion combining their reasons — multiple signals agreeing
+on roughly the same moment is treated as a stronger, higher-`confidence`
+suggestion than any signal alone. Suggestions landing inside an
+already-styled override are dropped, and the result is capped at 12 so a
+long video's timeline doesn't get cluttered. Rendered as dashed, dimmer
+pin markers, distinct from a placed-but-unarmed pin (solid, dimmer) and
+the armed pin (solid, full strength); clicking one opens a small menu —
+see 2.15 below for what that menu offers (this replaced an earlier,
+simpler "click = promote to an armed pin" behavior).
+
+**Verified for real**, not just read from the code: ran the actual
+exported `suggestTransitionPoints` against a synthetic transcript with a
+deliberate speaker-change + pause + emphasis + pace-shift all landing
+near the same real moment, confirmed the four signals correctly merged
+into one `confidence: 3` suggestion snapped to a real word boundary, and
+confirmed a suggestion inside an existing override is correctly
+suppressed.
+
+## 2.15. One-click auto-apply, a style menu on every pin, and editing an
+existing override's style
+
+Three related upgrades to the pin/override workflow above, closing the
+gap between "the system found a good transition point" and "the video
+actually looks different there":
+
+- **A theme is now suggested, not just a moment in time.**
+  `autoThemeIdForSuggestion` (`src/lib/themes.js`) maps a suggestion's own
+  reasons/speaker id to a specific bundled theme — emphasis → *Beast
+  Mode*, a speaker change → one of four themes rotated by `speaker_id %
+  4` (matching `captions.rs`'s own existing per-speaker color palette, so
+  the visual language stays consistent between diarization coloring and
+  theme choice), speeding up → *Hustle Energy*, slowing down →
+  *Documentary Serif*, a pause → *Minimalist Line*, falling back to the
+  app's factory default otherwise. `autoRangeForSuggestion` picks a
+  matching end time — a default ~4s span, capped early if another
+  suggestion sits closer than that so two auto-applied ranges never
+  overlap.
+- **Clicking any pin now opens a small menu** (`Timeline.jsx`'s new
+  `.timeline-popover`) instead of immediately acting, since a suggested
+  pin and a placed override pin now have more than one thing you might
+  want to do with them:
+  - A **suggested** pin's menu offers "✨ Auto-apply: `<theme name>`"
+    (creates the override immediately, with the auto-picked theme and
+    range, no further clicks), "🎨 Customize style" (opens
+    `CaptionOverridePanel` directly, pre-filled with the same
+    auto-computed range but the project's *base* style rather than an
+    auto-picked theme, so you pick the look yourself before Applying),
+    and "🚫 Remove this suggestion" (a suggestion the user doesn't want
+    to act on can be dismissed — tracked as a `Set` of dismissed times in
+    `Timeline.jsx`'s own state, filtered out of the list before it's
+    rendered *or* considered by auto-range-capping, so a dismissed one
+    doesn't quietly keep constraining a neighboring auto-apply either).
+  - **A real bug found here, from direct user testing**: "Customize
+    style" originally just armed a pin and closed the menu — the actual
+    style-picker never opened until the user *also* dragged a range by
+    hand from that armed pin, which looked from the outside like
+    clicking "Customize style" did nothing at all. Fixed as described
+    above — it's now a direct action like Auto-apply, not a two-step
+    "arm, then remember to drag" flow.
+  - An **existing override band**'s menu (new — these weren't clickable
+    at all before) offers "🎨 Change style" and "✕ Remove", showing the
+    override's own current theme name in the menu's header
+    (`displayNameFor`, already used elsewhere in this app for the same
+    purpose).
+  - The menu is `position: fixed`, anchored from the clicked marker's own
+    `getBoundingClientRect()` rather than a percentage-based offset
+    inside the track — `.timeline-track` itself has `overflow: hidden`
+    (needed so waveform/word content never spills out), which would clip
+    an absolutely-positioned menu popping up above it; escaping to
+    viewport coordinates avoids that entirely.
+- **Any existing override's style can now be changed**, not just removed.
+  `CaptionOverridePanel` (previously create-only) now doubles as an edit
+  panel: passing an override's own style/theme as the seed (instead of
+  the project's base style) and its own index as `excludeIndex` (so the
+  non-overlap check doesn't flag the range against itself) reuses the
+  exact same component for both flows, rather than building a second
+  one. `App.jsx` gained `updateCaptionStyleOverride(index, override)`
+  alongside the existing `add`/`remove` pair; edit mode also renders a
+  "Remove override" action so both changes and deletion happen from the
+  same place a click on the pin opened.
+
+**Not (re-)verified live in a running app for this change**: the app's
+own dev server was occupied by the user's own running instance both
+times this section's code was touched (including the "Customize style"
+fix above, which the user themselves caught by hand — this app's own
+usual real-browser click-through wasn't available either time), so this
+was checked via `npm run build` / `cargo build --lib` (both clean) plus a
+careful manual trace of the prop-wiring and of every export this depends
+on (`autoThemeIdForSuggestion`/`autoRangeForSuggestion`/`displayNameFor`,
+all already verified for real in earlier sections) — worth a real
+click-through once the dev server is free, and worth treating this
+section's UI with slightly less confidence than the rest of this
+document until then, precisely because that's how the first bug here was
+actually found.
+
+## 2.16. Real video transitions (zoom punch / flash cut) at a pin
+
+The pin/override system above only ever changed how *captions* look. This
+adds a second, independent kind of pin action: a real effect burned into
+the *footage itself* at that exact moment.
+
+**A real architectural constraint, established before writing any code**:
+this app's pipeline handles one continuous video per project — there's no
+second clip to crossfade *from*, so a traditional multi-clip crossfade
+transition doesn't apply here. What's built instead is two single-clip
+effects, both common in short-form editing at a tone/topic shift:
+- **Zoom punch** — a brief (0.4s) zoom-in-then-settle via ffmpeg's
+  `scale`/`crop`, the scale factor a half-sine function of the frame's own
+  timestamp (`t`), `eval=frame`.
+- **Flash cut** — a short white flash: a solid-color clip, alpha-faded in
+  (0.05s), held (0.05s), faded back out (0.05s), composited on top via
+  `overlay`.
+
+**Verified against real ffmpeg renders before any application code was
+written** (`video_transitions.rs`'s own doc comment has the full detail):
+- A synthetic 6s/180-frame test video confirmed both effects preserve
+  the *exact* frame count and duration — critical, since these filters
+  sit inside the same burn as every existing word/jump-cut/caption-override
+  timestamp; any duration drift here would desync all of them.
+- ffmpeg's `overlay` filter was confirmed to default to holding the flash
+  clip's last (fully faded-out, transparent) frame once that clip ends,
+  rather than truncating the whole output early — checked directly with a
+  deliberately too-short 1s flash source composited onto a 6s video,
+  confirming the output stayed the full 6s. This matters because the
+  color source's `duration` is set from this app's own best-effort
+  duration probe, which can occasionally come back `None`.
+- **The full combined graph** (transitions chained into the *same*
+  `-filter_complex` as the ASS caption overlay, transitions applied
+  first) was rendered end to end with real burned-in text, confirming
+  captions stay crisp, fixed, and unaffected by the footage zooming or
+  flashing underneath them — the actual visual goal, and the reason
+  transitions are applied *before* the `ass` filter in the chain rather
+  than after.
+
+**Backend** (`src-tauri/src/video_transitions.rs`, new): `VideoTransition
+{ time, effect }`, `effect` one of `zoom-punch` | `flash-cut`.
+`build_transition_filter` nests one `if(between(t,...))` per zoom (so
+multiple zoom pins on one video don't interfere) and chains one
+fade-in/fade-out pair per flash onto a single shared white color source.
+`captions.rs::burn_captions` gained a `video_transitions` parameter:
+when non-empty, it probes the video's real width/height/fps (new
+`ffmpeg::probe_video_dimensions` — unlike ASS, which scales via a fixed
+`PlayResX`/`PlayResY` regardless of actual resolution, these are literal
+pixel filters and need the real numbers), builds the combined
+transition+ass `-filter_complex`, and switches from `-vf` to explicit
+`-map` for both video and audio (`-filter_complex` disables ffmpeg's
+automatic stream selection entirely). **Not yet supported**: `segments.rs`'s
+long-video parallel-encode path — a transition's absolute timestamp has
+no shift/clip treatment across a segment boundary the way
+`CaptionStyleOverride` already has via `shift_overrides`, so
+`burn_captions` forces the single-pass path whenever any transition is
+present, correctness over that path's speedup, matching the same
+trade-off already made for a voiceover.
+
+**Frontend**: `videoTransitions` is a new per-project array (`{time,
+effect}`), parallel to `captionStyleOverrides` but deliberately
+independent — a transition changes the footage, not caption style, so
+either can be added to the same pin or to entirely different ones.
+Reachable from three places in `Timeline.jsx`'s popover menus (a
+suggested pin, an existing caption-style override, or a plain manually-
+dropped pin all now offer "🎬 Add zoom-punch here" / "🎬 Add flash-cut
+here" alongside their existing actions), rendered as their own small
+amber markers in a dedicated overlay row (distinct from the full-height
+pin/override lines so the two concepts stay visually separable even at
+the same timestamp), each clickable for its own "✕ Remove transition"
+menu — also listed, with the same remove action, in "More options → Style
+captions" below the caption-override list. Cleared on a jump-cut
+re-apply, same staleness reasoning as `captionStyleOverrides` (a re-cut
+renumbers the whole timeline; a transition's absolute `time` would land
+on whatever now happens to sit at that timestamp, not the moment it was
+actually placed for).
+
+Placing a plain dropped pin also changed here: clicking an *unarmed* one
+used to arm it immediately; it now opens the same kind of menu a
+suggestion/override gets ("✂️ Drag to set a caption-style range" plus the
+two transition actions plus remove) — clicking the *already-armed* one
+still removes it directly, unchanged, as a quick mid-drag-prep shortcut.
+
+**Not verified live in a running app**: same real constraint as 2.15 —
+the dev server was occupied by the user's own running instance while this
+was built. Checked via `npm run build` / `cargo build --lib` (both
+clean, `cargo test` itself still blocked by this environment's
+pre-existing `STATUS_ENTRYPOINT_NOT_FOUND` DLL issue, unrelated to this
+change) plus the real ffmpeg renders described above, which cover the
+part of this feature with genuine technical risk (the filter graph
+itself); the UI wiring is comparatively low-risk prop-threading, worth a
+real click-through once the dev server is free.
+
+### 2.16.1. Three real bugs found from actual use, plus a live-preview approximation
+
+All found by the user actually clicking through the feature above, not
+caught by the build/render verification alone:
+
+- **The popover could render off-screen with no way to reach the hidden
+  buttons.** The menu always drew *above* the clicked marker; with the
+  timeline sitting near the top of the window, its own top rows (the most
+  important ones — "Auto-apply"/"Change style"/"Customize") rendered
+  above the visible viewport and were silently clipped by the browser's
+  edge, invisible with no indication anything was missing. A first fix
+  (estimate the menu's height, flip below if the marker looked "too close
+  to the top") wasn't enough — a short window, or a marker near a
+  *different* edge, could still clip it. Replaced with a proper
+  measure-then-position approach: `Timeline.jsx` renders the popover
+  hidden (`visibility: hidden`, off-screen) first, a `useLayoutEffect`
+  measures its *real* rendered `offsetWidth`/`offsetHeight` (which varies
+  with content — a suggestion's menu has more rows than a transition
+  marker's), then computes `top`/`left` clamped fully inside
+  `window.innerWidth`/`innerHeight` on every edge before making it
+  visible — no more guessing.
+- **"Pin a style override" had no way to reach the new menu at all.**
+  That button auto-*armed* the pin it dropped (a leftover from before the
+  popover existed — "drop pin, immediately ready to drag"), skipping the
+  unarmed state a click would normally open a menu from. Clicking the new
+  pin again (since it was already armed) just removed it via the
+  "click-the-armed-pin" shortcut — there was no path left to the menu at
+  all for a pin dropped this way. Fixed: the button now opens the same
+  menu any other pin does, computed from the timeline track's own
+  bounding rect and the playhead's position (there's no click event to
+  anchor to, since the pin doesn't exist in the DOM yet) — its first
+  option, "✂️ Drag to set a caption-style range," now covers what the
+  auto-arm used to do, as an explicit choice instead of the only option.
+- **The override list (More options → Style captions) showed a
+  hand-tweaked override's *base* theme name with no indication it had
+  been customized** — a raw `CAPTION_THEMES` lookup by id, not the
+  already-existing `displayNameFor` helper (which appends "(Custom)"
+  once any field diverges from the theme's stock style) that
+  `Timeline.jsx`'s own tooltip/popover for the same override already
+  used. Fixed to call the same helper, so the two places agree.
+- **Neither effect showed up in the live preview at all** — a real,
+  honest gap, not a bug: `VideoPreview.jsx` plays the original video file
+  directly via a plain `<video>` element and only overlays caption text
+  on top; it never re-renders pixels the way `burn_captions` does, so
+  there was nothing there to make a zoom or flash happen. Added a CSS-only
+  *approximation*: a `transform: scale()` animation applied directly to
+  the `<video>` element for zoom-punch (clipped back down to
+  `.video-frame`'s own bounds via a new `overflow: hidden` on that
+  element, mirroring the real crop-back-to-original-size shape) and a
+  plain white `opacity`-animated div for flash-cut, composited as a
+  sibling *before* the caption overlay layer in the DOM so captions still
+  paint on top, matching the real burn's order. Both effects use two
+  identically-shaped keyframe sets per effect under different names
+  (`-a`/`-b`), alternated on each trigger — re-applying the *same*
+  animation class while one is already playing doesn't restart it in CSS,
+  since the resolved `animation-name` value wouldn't actually change;
+  alternating guarantees a genuine change even for two same-effect
+  transitions placed close together. Explicitly a preview
+  *approximation*, not a promise of frame-identical timing/shape to the
+  real ffmpeg filter graph — said so directly in the code's own comments
+  rather than implying it's pixel-equivalent.
+  - **Verified for real** (not just read from the code): the crossing-
+    detection algorithm (`t.time > lastChecked && t.time <= currentTime`,
+    the rule that decides when to fire) was reproduced standalone and run
+    under real Node.js assertions covering normal forward playback
+    (fires exactly once), seeking backward past a transition (does not
+    fire), seeking forward across one again (fires again, alternates
+    variant), scrubbing forward past two same-effect transitions in one
+    jump (both fire, variants end up correct), and two different effects
+    at different times (independent counters, no cross-interference) —
+    13 assertions, all passing.
+
+### 2.16.2. Auto-picking which transition effect fits — a rule, not a model
+
+Extends "✨ Auto-apply" (2.15) to also drop the better-fitting transition
+effect at the same point, not just the caption theme. Deliberately **not**
+a model of any kind, small or otherwise — `autoTransitionEffectForSuggestion`
+(`src/lib/captions.js`) is a plain priority-ordered rule over the same
+signals `suggestTransitionPoints` already computed (speaker change, pace,
+pause, emphasis), the same shape as `autoThemeIdForSuggestion` already
+uses for theme selection. Picking one of two fixed, categorical options
+from already-structured signal data isn't an open-ended generation task
+the way writing content-strategy copy or a music prompt is (the two
+places this app *does* reach for its local LLM) — there's no training
+data for "which transition effect is best," and a rule captures the same
+editorial logic a model would have to learn anyway, for zero cost and
+instant, deterministic results.
+
+The editorial logic: a flash cut is the traditional hard-punctuation mark
+between two different speakers or during a quiet beat — brief, low-energy.
+A zoom punch rides *rising* energy — vocal emphasis or a pace speedup.
+Slowing down doesn't fit either effect's own energy well, but only two
+effects exist in the library today, so it takes the calmer of the two.
+Clicking "✨ Auto-apply" now shows and applies both picks together (e.g.
+"Auto-apply: Golden Karaoke + 🎬 Zoom punch") in one click; the manual
+"Add zoom-punch/flash-cut here" buttons are unchanged for full control.
+
+**Verified for real**: ran the actual exported function against every
+individual reason plus priority-order cases (two reasons present at once,
+in both array orders) — 9 assertions, all passing, confirming Emphasis
+correctly outranks Speaker change regardless of which one
+`suggestTransitionPoints` happened to list first.
+
+## 2.16.3. Growing the transition library (shake, color pulse), and a
+cloud-vs-local detour
+
+Before adding effects, real research (not assumed) into what professional
+editors and short-form platforms actually use, current as of this
+writing:
+- **Classic film editing**: cross dissolve, wipe, iris, whip pan, match
+  cut — [StudioBinder's guide](https://www.studiobinder.com/blog/types-of-editing-transitions-in-film/),
+  [Wedio's guide](https://www.wedio.com/en/learn/types-of-transitions-in-film).
+  Nearly all of these are fundamentally **multi-clip** techniques (one
+  shot replacing another) — they don't apply to this app's single-
+  continuous-clip pipeline, the same real constraint already established
+  when zoom-punch/flash-cut were first chosen over a true crossfade.
+- **Current (2026) short-form editing**: velocity edits (speed ramps),
+  glitch/RGB-split, smooth zoom-ins, whip pans, and music-locked cuts —
+  [CapCut's own trend page](https://www.capcut.com/help/capcut-transitions).
+  Effective ones run 0.2–0.4s and land on a beat or word — matching the
+  durations already chosen for this library (0.15–0.4s) independently.
+
+From that list, **velocity edits/speed ramps are excluded on purpose** —
+any effect that changes local playback speed shifts every word timestamp
+after it out of sync with captions, the same reason a true crossfade was
+excluded earlier. Glitch/RGB-split is a strong future candidate (flagged,
+not built this round). **Shake/jitter** and **color pulse** (both
+requested) were added now:
+
+- **Shake**: reuses zoom punch's own "enlarge slightly for headroom, then
+  crop back down" trick, but the crop's x/y offset wobbles via two
+  different-frequency sine/cosine terms (9Hz and 11Hz) instead of staying
+  centered — different frequencies so it traces a genuine 2D jitter
+  rather than one straight diagonal line back and forth.
+- **Color pulse**: a brief desaturate-to-gray-and-back via ffmpeg's
+  `eq=saturation=`, the same half-sine-bump shape zoom punch's scale
+  factor already uses.
+
+**Verified against real ffmpeg renders before any Rust code was
+written**, same discipline as the first two effects: a real 6s/180-frame
+test video confirmed both preserve the exact frame count and duration:
+extracted consecutive frames across the shake window and confirmed the
+offset genuinely oscillates (not just drifts in one direction — two
+frames landed at different offsets consistent with two different phases
+of the wobble, not further along a single line); extracted the
+color-pulse's peak frame and confirmed a real, visible desaturation
+(vibrant color bars visibly washed to muted gray/brown/green tones),
+distinct from flash-cut's white wash.
+
+**A real cloud-API question was raised and answered honestly, not
+assumed**: whether a cloud video-generation API (Runway, Luma, Kling,
+Veo, or a hosted-model marketplace like Replicate/fal.ai) could generate
+transitions "effectively and economically." Conclusion: no, not for this
+job specifically — those APIs charge per second of *generated* video
+(real money, real network/generation latency, the user's footage leaving
+their machine) for something ffmpeg already produces for $0, instantly,
+entirely locally. This would also be the app's first cloud dependency in
+its core editing pipeline, breaking a pattern held everywhere else (LLM,
+STT, TTS, music generation, embeddings are all local). A genuinely
+different, generative transition (not a parametric filter) would be a
+real use case for cloud video generation, but that's a distinct, much
+bigger feature needing its own real cost/quality investigation before
+committing — not something to fold into this library.
+
+Rust: `video_transitions.rs`'s `TransitionEffect` enum gained `Shake`/
+`ColorPulse` variants; `build_transition_filter` now chains up to four
+stages in a fixed order (zoom → shake → color pulse → flash), each
+optional, computed once from real integration tests (`all_four_effects_
+chain_in_fixed_zoom_shake_pulse_flash_order`, `single_shake_...`,
+`single_color_pulse_...`) alongside the two carried over from before.
+
+## 2.16.4. Collapsing four sprawling per-pin menus into one small,
+consistent menu
+
+Real user feedback: with the library at four effects, the old per-pin-
+kind popovers (a suggestion's menu alone had grown to 6 rows: Auto-apply,
+Customize style, four "Add `<effect>` here" buttons, Remove suggestion,
+Cancel) had become unwieldy, and the request was explicit — keep it to
+"add/edit/remove (if added) caption style, add/edit/remove (if added)
+transition, remove pin, cancel."
+
+This replaced four separate, hand-built popovers (one per pin "kind":
+suggestion, override band, plain pin, transition marker) with **one**
+menu built fresh from what's actually at the clicked time, regardless of
+which kind of marker was clicked:
+- `Timeline.jsx`'s `openPopoverAt(time, source, event)` resolves, once,
+  at open time: whether a `captionStyleOverride` already covers this
+  exact time (`overrideIndex`), whether a `videoTransition` already sits
+  here (`transitionIndex`, matched within a small tolerance), and —
+  only for a suggestion — the `reasons`/`speakerId` that let the menu
+  seed a smart default.
+- The menu then shows **Add** for whichever of caption style/transition
+  is missing, or **Edit** + **Remove** for whichever is already present —
+  the exact same menu shape no matter which of the four marker kinds was
+  clicked, capped at a handful of rows regardless of how large the
+  transition library ever grows.
+- "Add transition" (or "Edit transition") opens a small second screen —
+  the four effect choices plus a "Back" — rather than the top-level menu
+  growing a row per library entry. The previously-separate "✨ Auto-apply"
+  one-click action was folded into "🎨 Add caption style" instead of kept
+  as a second option: it now always opens the style panel, but pre-fills
+  it with the auto-picked theme (`autoThemeIdForSuggestion`) when the pin
+  came from a suggestion — the "smart default" is preserved, just no
+  longer a separate button next to "Customize."
+- **A real dead-code cascade this simplification caused**: the old
+  "arm a pin, then drag to stretch a range from it" workflow (an entire
+  `armedIndex`/`armPin`/drag-anchor mechanism) had no menu action left
+  that could ever set it once "✂️ Drag to set a caption-style range" was
+  removed from the (now-unified) menu — CaptionOverridePanel's own
+  editable numeric start/end fields already cover the same "adjust the
+  range" need. Removed entirely rather than left as unreachable code:
+  `armedIndex` state, `armPin()`, the CSS `.timeline-pin-marker.armed`
+  rules, and the mousemove handler's armed-pin drag-anchor branch (the
+  direct drag-on-the-waveform gesture itself is untouched — it never
+  depended on pins at all).
+
+"Remove pin" only appears for a suggestion or a manually-dropped pin —
+an override band or transition marker has no separate "pin" entity of
+its own to remove, only its own content (removing that already leaves
+nothing behind).
+
+## 2.16.5. LLM-refined transition planning ("✨ AI-suggest transitions")
+
+The heuristic candidate list (`suggestTransitionPoints`) only ever reasons
+from *timing* signals — a pause, a speaker change, a pace shift, vocal
+emphasis. It has no idea what's actually being said, so it can't tell "a
+mechanical pause mid-sentence" from "the exact moment a struggle turns
+into a win." This adds a second pass, using the same local LLM already
+running this app's content-strategy and music-suggestion features
+(`llm.rs`, Qwen2.5-0.5B-Instruct), that reads the real transcript text
+and decides which of the heuristic's own candidates actually deserve a
+transition, and picks the best-fitting effect for each using the
+transcript's own content — not just the mechanical reason code.
+
+**A real cloud-vs-local question preceded this, answered honestly, not
+assumed** (raised directly: "is there a cloud API to do this
+economically"): no cloud video-generation API (Runway, Luma, Kling, Veo,
+or a hosted-model marketplace) is worth it for this specific job — they
+bill per second of *generated* video for something this app's own local
+LLM (already running, already free) can plan from plain text in a
+fraction of a second, and it would be this app's first cloud dependency
+in its core editing pipeline, breaking a pattern held everywhere else.
+
+**The design changed once, based on real evidence, not preference.** The
+first design let the LLM freely propose its own transition timestamps
+from a compact per-sentence JSON summary (start/end/text/speaker/
+silence-before/after — the same shape ffmpeg scene-detection + Whisper
+transcription would naturally produce). Tested directly against the real
+local model across several synthetic transcripts before writing any Rust:
+twice, it returned a `time` that didn't match any real sentence boundary
+at all — once literally a segment's own *end* time instead of a start.
+Free generation of a number that happens to be exactly right is a genuinely
+harder constraint-following task for a 0.5B model than classifying among
+a handful of numbers it's explicitly given. **Redesigned instead to only
+ever let the LLM choose among the heuristic's own already-real candidate
+times** — never invent one — which closed the failure mode structurally:
+re-verified across 5 fresh test runs (3 different transcripts, 2 of them
+exact repeats for a consistency check) with **zero invalid times**
+returned. `transition_planner.rs`'s own `plan_transitions` still validates
+every returned time against the real candidate list as a defensive
+backstop regardless (plus deduplicates — one real test response repeated
+the same time twice) — never trusting the model's echo blindly, even
+after a clean verification run, the same "verify, then still validate"
+discipline `content_ideas.rs`'s `sanitize_hashtag`/`sanitize_emoji` already
+apply to a different untrusted-output failure mode.
+
+**A second, real, honestly-kept limitation, not fixed**: asked to judge a
+plain step-by-step list with no real narrative shift (a baking recipe, a
+coding tutorial), this 0.5B model does not reliably say "none of these
+deserve one" — even with a worked few-shot example demonstrating exactly
+that correct answer, it still tended to keep at least one candidate with
+an invented-sounding reason on this kind of flat content. Matches this
+project's own established precedent for owning a small local model's real
+limits (`content_ideas.rs`'s Tamil-comprehension gap, `music_gen.rs`'s
+imperfect mood-matching) rather than silently shipping around them. This
+is mitigated architecturally rather than solved: every result is still a
+plain `VideoTransition`, individually removable with one click via
+Timeline.jsx's own popover, never auto-committed to anything harder to
+undo — and since it's only ever *classifying* the heuristic's own
+already-pre-filtered candidates, a false positive here is never worse
+than what the heuristic alone would already have suggested.
+
+**Research into what professional editors/current platforms would call
+these transition types** (dissolve, zoom-blur, whip-pan) also directly
+informed why this doesn't use those names or ffmpeg's `xfade` filter
+family: see 2.16.3's own research section — those are fundamentally
+multi-clip crossfade techniques that would need to split this app's one
+continuous video and re-derive every downstream timestamp, a separate,
+larger investigation (still open — see "Next: a real crossfade
+feasibility investigation" below), not something to fold into this pass.
+The four effects this LLM plans among are exactly the ones that already
+exist and render correctly today (zoom-punch, flash-cut, shake,
+color-pulse) — the JSON-schema-constrained generation this app already
+uses everywhere else (`content_ideas.rs`, `music_gen.rs`) keeps the model
+from producing anything outside that enum at the token level, and the
+response is deserialized straight into `video_transitions.rs`'s own real
+`TransitionEffect` type, not a raw string.
+
+Backend: new `src-tauri/src/transition_planner.rs`, one command
+(`suggest_transition_plan`). Segments the transcript into sentence-like
+chunks (breaking on `.`/`!`/`?`), computes real silence-before/after gaps
+and speaker ids per segment (reusing `captions.rs`'s own `speaker_id_at`,
+promoted to `pub(crate)`), budgets the transcript the same way
+`content_ideas.rs`/`music_gen.rs` already do (`llm_budget.rs`, this
+prompt's own real measured token cost — 1020 tokens wrapped, via
+llama-server's `/tokenize` endpoint), and calls `llm::complete` at a low
+0.2 temperature (a classification task over given candidates, not
+creative generation, the same reasoning `tts.rs`'s emotion classifier
+already documents for its own low temperature). Frontend: `App.jsx`'s
+`suggestTransitionPlan` writes through `upsertProjectSlice(forProjectId,
+...)` directly (not the `patchCurrentProject`-bound `addVideoTransition`)
+since this is an async, several-second call — the same "never assume the
+project you started this for is still on screen when it resolves" rule
+`generateContentIdeas`/`runPipelineFor` already follow. A new "✨
+AI-suggest transitions" button next to Timeline.jsx's existing "📍 Pin a
+style override" sends the current (non-dismissed) suggestion list's own
+times and reports back what it added, including the LLM's own authored
+reason for each (shown once in a dismissable message, not persisted on
+the `VideoTransition` itself — that struct is also `burn_captions`'s own
+input shape, and the reason has no bearing on the actual ffmpeg filter).
+
+**Next: a real crossfade feasibility investigation** (not started) — the
+open question is whether it's worth teaching the whole downstream
+pipeline (captions, jump cuts, other overrides/transitions) to re-derive
+their timestamps after a mid-video crossfade shortens the video by the
+overlap duration, which is what would actually be needed to offer a real
+dissolve/wipe effect (via ffmpeg's own `xfade` filter, splitting the
+video at the transition point) rather than the four same-duration-in/out
+effects this pass shipped.
+
+## 2.17. A clean, minimal sidebar: edit-via-pencil, fast full-text search,
+project status, view-original relocated
+
+Requested directly, several real changes to the project library sidebar
+(`Sidebar.jsx`) and its backend (`library.rs`):
+
+**Editing moved behind a pencil icon.** Title/description/hashtags used
+to be permanently-visible inline inputs at the top of the sidebar,
+occupying space and staying editable whether or not anyone was actually
+using them. They're now read-only display text; clicking the new ✏️ icon
+next to the current project's title opens `EditProjectModal.jsx` (new,
+`.shell-modal` convention, same as `MoreOptionsModal.jsx`) with a real
+Cancel that discards unsaved changes, since a modal needs that in a way a
+permanently-open field never did. AI-generated title/hashtags still
+auto-fill the moment transcription finishes, exactly as before -- that
+writes into the same store fields this now just displays.
+
+**"View original video" moved to an icon next to the pencil**, replacing
+the old always-visible thumbnail box + text link below it. Toggling it
+still shows the same real, untouched original file (`originalVideoPath`,
+set once per project and never mutated) inline, just triggered from the
+title row instead of a separate large box.
+
+**Semantic (embedding-based) search replaced with SQLite's own FTS5 full-
+text search** -- requested directly ("fetch results faster," "ignore
+vector embeddings"). Real, concrete wins, not just a simplification:
+- **No more warm-up latency.** The old version needed a Python
+  `sentence-transformers` server (`embeddings.rs`, now deleted) kept
+  running in the background, with a real ~19s model-load the first time
+  a fresh app session searched. FTS5 is built into SQLite itself --
+  `search_projects` now runs synchronously, in-process, with no server to
+  start at all.
+- **No more separate re-embed step.** The embedding version needed its
+  own debounced "re-embed this project" timer (`projectStore.js`) to keep
+  the search index from drifting out of sync with edits. FTS5's index is
+  now rebuilt synchronously, in the same function, as part of the exact
+  `insert_project`/`update_project_row` calls that already run on every
+  save -- one less moving part, not a new one.
+- **Verified directly before writing any code**, matching the discipline
+  the original `sqlite-vec` integration itself used: a standalone probe
+  confirmed FTS5 needs no extra Cargo feature -- it's already compiled
+  into this project's exact `rusqlite = { version = "0.32", features =
+  ["bundled"] }` -- and confirmed the query-sanitization scheme this uses
+  (wrap every whitespace-split term in escaped double quotes plus a
+  trailing `*`, e.g. `foo bar` -> `"foo"* "bar"*`) survives every FTS5
+  special-syntax character tried against it (an apostrophe, a hyphen, a
+  bare `"`) without erroring, while still supporting real prefix matches
+  (typing "gar" finds both "garlic" and "Garage"). `sqlite-vec`/
+  `zerocopy` were removed from `Cargo.toml` entirely, not just left
+  unused, once nothing called into either anymore.
+
+**Real project status, shown as a badge next to the title** (both the
+current project's header and every row in the list): Pending → 📝
+Transcribed → 🔥 Burned → 📤 Exported → ✅ Published, plus a live ⚙️
+Processing that overrides all of them while a background job is actually
+running. Computed entirely in a new `src/lib/projectStatus.js`, never in
+Rust -- `Project.state` is deliberately opaque to `library.rs` (see that
+module's own doc comment on why), so anything that needs to peek inside
+it to derive a status belongs on the same side that already assembles and
+reads that blob. Two of these needed a small, honest backend addition
+first: `exported_at`/`published_at` are new columns, stamped by new
+`mark_project_exported`/`mark_project_published` commands the moment
+`ExportButton.jsx`'s Download and `ScheduleToInstagramButton.jsx`'s
+"post now" actually succeed -- distinct from merely having burned a file,
+which `last_burned_path` already covered. **One real, open gap, flagged
+rather than faked**: a *scheduled* (not-yet-fired) Instagram post never
+marks a project published, since `scheduler.rs`'s own queue has no notion
+of which project a scheduled job came from -- only an immediate "post
+now" is tracked. Making the scheduled path work the same way would mean
+teaching the scheduler's own persisted job format about project ids, a
+real, separate change not folded into this pass.
+
+## 2.18. Per-row actions, a popup video preview, and a "+" flow with an
+AI content-strategy intake form
+
+A second sidebar pass, requested directly, on top of 2.17's redesign —
+planned in full first (see `EnterPlanMode`'s own approved plan) since it
+touched enough surface area and had enough real forks (a real second OS
+window vs. an in-app modal for video preview; a silent on-disk draft vs.
+a real, visible library entry) to be worth confirming before writing any
+code, rather than guessing.
+
+**Every row gets its own ✏️/🎬 actions now**, not just the currently-open
+project. `EditProjectModal.jsx` (already built for the single "currently
+open" case) turned out to need no changes at all to support this — it
+was already generic over `title`/`description`/`hashtags` + `onSave`;
+only `Sidebar.jsx`'s own call site needed a second save path (`invoke("
+save_project", ...)` directly, for a row that isn't the live/currently-
+open project, vs. the existing live setters when it is). Video preview
+moved from an inline thumbnail/player into `VideoPreviewModal.jsx` (new,
+plain `.shell-modal` convention, confirmed directly as the right call
+over a real second OS window like the dictation HUD — consistency with
+every other popup in this app over a more "native" but heavier build) —
+every row already carries its own `original_path` from `list_projects`,
+so this has no dependency on whichever project happens to be open.
+
+**The whole standalone "Media Pool" section is gone.** No more permanent
+video thumbnail, "Choose video(s)…" button, or separate "currently open
+project" mini-header at all — the active row's own highlight is the only
+"what's open" indicator now. In its place: a small "+" icon next to the
+"Projects" heading, opening `NewProjectModal.jsx`.
+
+**That popup has two tabs.** "Upload video" is a thin wrapper around the
+exact same multi-file `pickVideo` flow that already existed. "✨ AI
+content strategy" is new: a from-scratch video-generation intake form —
+**parameters only, actual generation explicitly deferred** to a future
+cloud-API integration (this project's own earlier local-model
+investigation already found real generation wasn't CPU-feasible at a
+usable speed — see the paused plan's real measured numbers above; this
+picks the idea back up on the input side only). Asked directly to
+"suggest more parameters" for an efficient pipeline, the form ended up
+with five groups, reusing this app's own existing concepts where one
+already fit rather than inventing parallel ones (spoken language;
+`content_ideas.rs`'s own free-text `hints`; `music_gen.rs`'s own
+real 3-category music framing, chosen originally because a plain "pick a
+mood" ask collapsed into near-duplicate suggestions at this model's
+size):
+- **Core brief**: project name, content brief, goal/call-to-action.
+- **Audience & market**: target country, target audience, industry/
+  sector, culture, spoken language.
+- **Character & visual style**: character description *and* an optional
+  reference photo (not either/or), visual style/mood, brand colors.
+- **Tone & format**: tone, target length, music mood.
+- **Extra hints** (optional freeform).
+
+**Submitting it creates a real, visible project** — confirmed directly,
+not assumed, as the right call over a silent on-disk file: a new
+"📋 Drafted" status (`projectStatus.js`, checked right after "processing"
+and before every other status, since a draft with no video can't be
+transcribed/burned/exported/published regardless of what else its row
+says) so there's something real in the list to come back to once
+generation exists, not an easy-to-forget file. Backend: one new
+`library.rs` command, `create_strategy_draft`, deliberately handling
+*both* create and update (`id: None`/`id: Some(existing)`) rather than a
+separate edit path — a real correctness reason, not just less code: only
+routing both through the same character-photo-copy step keeps a
+*changed* reference photo from leaking its raw, pre-import OS path into
+`state` unconverted the way a naive direct `save_project` call on the
+edit path would have. `original_path`/`original_filename` are stored as
+plain empty strings for a draft — both columns are already `NOT NULL`
+but nothing else in the schema requires them non-empty, and
+`MainPanel.jsx` already had a real "no video" empty state for a falsy
+`videoPath` before this — `projectStatus.js` is what turns that into a
+real "Drafted" status instead of a broken-looking blank project.
+Clicking a Drafted row (or its own pencil icon) reopens
+`NewProjectModal.jsx` straight to the strategy tab, pre-filled, calling
+that same upsert command again with its own id.
+
 ## 3. Install project dependencies
 
 ```bash

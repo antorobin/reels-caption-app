@@ -412,6 +412,17 @@ footer {
   border-color: #ccc;
 }
 
+.theme-card-selected {
+  border-color: #1a56db;
+  border-width: 2px;
+  box-shadow: 0 0 0 1px #1a56db;
+}
+
+.theme-card-selected-badge {
+  color: #1a56db;
+  margin-left: 4px;
+}
+
 .theme-card-swatch {
   width: 100%;
   display: flex;
@@ -677,6 +688,11 @@ footer {
 
 .video-frame {
   position: relative;
+  /* Needed for the zoom-punch preview approximation below: clips a
+     transform-scaled <video> back down to this frame's own bounds, the
+     same "zoom but stay inside the original box" shape the real ffmpeg
+     crop produces. Nothing else in this frame relies on overflowing it. */
+  overflow: hidden;
 }
 
 .video-preview-player {
@@ -685,6 +701,164 @@ footer {
   max-height: 360px;
   border-radius: 8px;
   background: #000;
+}
+
+/* Live-preview approximations of video_transitions.rs's two effects --
+   CSS `transform`/`opacity` animations, not the real ffmpeg filter graph,
+   so the exact shape/timing is close but not guaranteed identical to what
+   Burn & Export actually produces. Two identically-shaped keyframe sets
+   under different names (-a/-b) per effect, alternated by
+   VideoPreview.jsx: re-applying the *same* animation class while it's
+   still playing does not restart it, since the resolved `animation-name`
+   wouldn't actually change -- alternating guarantees each new trigger is
+   a genuine change even for two transitions of the same effect placed
+   close together. */
+@keyframes video-zoom-punch-kf-a {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.18);
+  }
+}
+
+@keyframes video-zoom-punch-kf-b {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.18);
+  }
+}
+
+.video-zoom-punch-anim-a {
+  animation: video-zoom-punch-kf-a 0.4s ease-in-out;
+}
+
+.video-zoom-punch-anim-b {
+  animation: video-zoom-punch-kf-b 0.4s ease-in-out;
+}
+
+.video-flash-cut-overlay {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@keyframes video-flash-cut-kf-a {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  33%,
+  67% {
+    opacity: 1;
+  }
+}
+
+@keyframes video-flash-cut-kf-b {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  33%,
+  67% {
+    opacity: 1;
+  }
+}
+
+.video-flash-cut-anim-a {
+  animation: video-flash-cut-kf-a 0.15s ease-in-out;
+}
+
+.video-flash-cut-anim-b {
+  animation: video-flash-cut-kf-b 0.15s ease-in-out;
+}
+
+/* Approximates video_transitions.rs's shake -- a handful of keyframe
+   stops rather than a true sine/cosine wobble (CSS keyframes are
+   discrete points, not a continuous expression the way the real ffmpeg
+   filter's per-frame `t`-based crop offset is), but reads as a
+   comparable jittery 2D jolt for preview purposes. */
+@keyframes video-shake-kf-a {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  20% {
+    transform: translate(6px, -4px);
+  }
+  40% {
+    transform: translate(-5px, 5px);
+  }
+  60% {
+    transform: translate(4px, 4px);
+  }
+  80% {
+    transform: translate(-6px, -3px);
+  }
+}
+
+@keyframes video-shake-kf-b {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  20% {
+    transform: translate(6px, -4px);
+  }
+  40% {
+    transform: translate(-5px, 5px);
+  }
+  60% {
+    transform: translate(4px, 4px);
+  }
+  80% {
+    transform: translate(-6px, -3px);
+  }
+}
+
+.video-shake-anim-a {
+  animation: video-shake-kf-a 0.4s ease-in-out;
+}
+
+.video-shake-anim-b {
+  animation: video-shake-kf-b 0.4s ease-in-out;
+}
+
+/* Approximates video_transitions.rs's color pulse -- CSS `filter:
+   saturate()` in place of the real ffmpeg `eq=saturation=`, same
+   half-sine-bump shape (unchanged, near-zero, unchanged). */
+@keyframes video-color-pulse-kf-a {
+  0%,
+  100% {
+    filter: saturate(1);
+  }
+  50% {
+    filter: saturate(0.05);
+  }
+}
+
+@keyframes video-color-pulse-kf-b {
+  0%,
+  100% {
+    filter: saturate(1);
+  }
+  50% {
+    filter: saturate(0.05);
+  }
+}
+
+.video-color-pulse-anim-a {
+  animation: video-color-pulse-kf-a 0.3s ease-in-out;
+}
+
+.video-color-pulse-anim-b {
+  animation: video-color-pulse-kf-b 0.3s ease-in-out;
 }
 
 .video-overlay-layer {
@@ -769,6 +943,18 @@ footer {
   text-align: center;
   line-height: 1.1;
   white-space: pre-wrap;
+  /* `white-space: pre-wrap` only actually wraps once something narrows
+     the box -- as a flex item (child of .video-overlay-anchor) its
+     default `min-width: auto` otherwise lets it grow to fit the whole
+     line unwrapped, no matter how long. `max-width` gives it something
+     to wrap against; `min-width: 0` overrides the flex default so it's
+     actually allowed to shrink that far. Roughly matches the ~4% side
+     margins the real ASS burn uses (captions.rs's MarginL/MarginR),
+     confirmed missing here the hard way -- a long sentence ran off the
+     edges in the live preview instead of wrapping, while the actual
+     burned video (real libass, WrapStyle 0) already wrapped correctly. */
+  max-width: 92%;
+  min-width: 0;
 }
 
 .video-cascade-caption {
@@ -776,6 +962,8 @@ footer {
   flex-direction: column;
   align-items: center;
   gap: 0.1em;
+  max-width: 92%;
+  min-width: 0;
 }
 
 .video-cascade-line {
@@ -783,6 +971,10 @@ footer {
   text-align: center;
   line-height: 1.1;
   white-space: pre-wrap;
+  /* Same reasoning as .video-overlay-text above -- a column flex item
+     needs its own min-width override too, not just its parent's. */
+  max-width: 100%;
+  min-width: 0;
 }
 
 .video-timeline {
@@ -943,22 +1135,57 @@ footer {
   gap: 10px;
 }
 
-.shell-sidebar-thumb {
-  border: 1px solid var(--shell-accent);
+/* The current project's compact header -- title, status, and the pencil/
+   view-original icon buttons all on one line, replacing the old always-
+   visible thumbnail box + inline edit form entirely (requested directly:
+   "clean and minimal"). */
+.shell-sidebar-current {
+  border: 1px solid var(--shell-border);
   border-radius: 8px;
-  overflow: hidden;
+  padding: 8px 10px;
+  background: var(--shell-bg-2);
 }
 
-.shell-sidebar-thumb-frame {
-  aspect-ratio: 9 / 16;
-  background: linear-gradient(160deg, var(--shell-bg-2), var(--shell-bg-0));
+.shell-sidebar-current-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shell-sidebar-current-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--shell-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.icon-button {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--shell-border);
+  background: var(--shell-bg-1);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.shell-sidebar-thumb-frame[role="button"] {
-  cursor: pointer;
+.icon-button:hover {
+  border-color: var(--shell-accent);
+}
+
+.icon-button.active {
+  background: var(--shell-accent);
+  border-color: var(--shell-accent);
 }
 
 .shell-sidebar-original-player {
@@ -966,21 +1193,14 @@ footer {
   width: 100%;
   aspect-ratio: 9 / 16;
   background: #000;
-}
-
-.shell-sidebar-original-toggle {
-  display: block;
-  width: 100%;
-  text-align: center;
-  padding: 6px 0 8px;
-  font-size: 11px;
+  margin-top: 8px;
+  border-radius: 6px;
 }
 
 .shell-sidebar-video-path {
-  font-size: 12px;
-  color: var(--shell-text);
-  padding: 8px 10px;
-  background: var(--shell-bg-2);
+  font-size: 11px;
+  color: var(--shell-text-dim);
+  margin-top: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -993,15 +1213,46 @@ footer {
   margin: 4px 0 0;
 }
 
-/* Editable title/description/hashtags for the currently-open project
-   (Sidebar.jsx) -- plain dark-shell form fields, same token set as the
-   rest of the sidebar chrome rather than the light .inspector-panel
-   styling used further down the tool panels. */
-.project-details-form {
+/* Editable title/description/hashtags -- now only ever shown inside
+   EditProjectModal.jsx's popup (opened via the pencil icon), not
+   permanently visible in the sidebar itself. Plain dark-shell form
+   fields, same token set as the rest of the sidebar chrome rather than
+   the light .inspector-panel styling used further down the tool panels. */
+.edit-project-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 10px;
+}
+
+.edit-project-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
   margin-top: 4px;
+}
+
+/* `.project-title-input`/`.project-description-input`/`.project-hashtags-
+   input` below were originally styled for the dark sidebar chrome they
+   used to live in permanently -- `.shell-modal` itself is a plain white
+   card (see MoreOptionsModal.jsx's own light-mode convention), so those
+   dark-shell-token colors need overriding here specifically, not reused
+   as-is, or they'd render as a dark box awkwardly floating inside a white
+   modal. */
+.edit-project-modal .project-title-input,
+.edit-project-modal .project-description-input,
+.edit-project-modal .project-hashtags-input {
+  background: #f5f5f7;
+  color: #1a1a1a;
+  border-color: #ddd;
+}
+
+.edit-project-save {
+  background: var(--shell-accent);
+  border-color: var(--shell-accent);
+  color: #fff;
 }
 
 .project-title-input,
@@ -1069,7 +1320,18 @@ footer {
 }
 
 .project-list-heading {
-  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0;
+}
+
+.new-project-button {
+  width: 22px;
+  height: 22px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--shell-text);
 }
 
 .project-list-count {
@@ -1101,12 +1363,20 @@ footer {
 }
 
 .project-list-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--shell-text);
+}
+
+.project-list-title-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 
 .project-processing-badge {
@@ -1115,8 +1385,7 @@ footer {
   height: 7px;
   border-radius: 50%;
   background: var(--shell-accent);
-  margin-right: 6px;
-  vertical-align: middle;
+  flex-shrink: 0;
   animation: project-processing-pulse 1.4s ease-in-out infinite;
 }
 
@@ -1130,18 +1399,39 @@ footer {
   }
 }
 
-.project-list-description {
-  font-size: 11px;
+/* One badge per project-list-item and one in the current-project header
+   -- see projectStatus.js for what each status means and how it's
+   derived. Muted, dark-shell-token backgrounds by default; "processing"
+   and "published" get their own accent colors since those two are the
+   ones most worth catching at a glance. */
+.project-status-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--shell-bg-1);
+  border: 1px solid var(--shell-border);
   color: var(--shell-text-dim);
-  margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
 }
 
-.project-list-hashtags,
+.project-status-badge.status-processing {
+  color: #fff;
+  background: var(--shell-accent);
+  border-color: var(--shell-accent);
+}
+
+.project-status-badge.status-published {
+  color: #2ecc71;
+  border-color: #2ecc71;
+}
+
+.project-status-badge.status-burned {
+  color: #f59e0b;
+  border-color: #f59e0b;
+}
+
 .project-list-filename {
   font-size: 10.5px;
   color: var(--shell-text-dim);
@@ -1268,6 +1558,26 @@ footer {
 .inspector-panel h2 {
   margin-top: 0;
   font-size: 15px;
+}
+
+/* Explicit light background + dark text here, not inherited -- this
+   panel sits inside .shell-inspector-col's *dark* shell chrome
+   (--shell-bg-1), and this codebase has a documented past bug from
+   exactly this mismatch (see the .link-button comment above): dark text
+   inherited from the light-theme default, with no light background under
+   it, rendered invisible against the dark shell. */
+.current-theme-panel {
+  background: #f7f7f8;
+  color: #1a1a1a;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-top: 12px;
+}
+
+.current-theme-panel-name {
+  font-weight: 600;
+  margin: 6px 0 8px;
 }
 
 .inspector-panel-header {
@@ -1587,6 +1897,215 @@ footer {
   width: 640px;
 }
 
+.video-preview-modal {
+  width: 420px;
+}
+
+.video-preview-modal-player {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  background: #000;
+  border-radius: 6px;
+}
+
+.new-project-modal {
+  width: 560px;
+}
+
+.new-project-upload-tab {
+  padding: 8px 0;
+}
+
+.new-project-section-heading {
+  font-size: 12px;
+  font-weight: 700;
+  color: #444;
+  margin: 18px 0 8px;
+  padding-top: 10px;
+  border-top: 1px solid #eee;
+}
+
+.new-project-section-heading:first-of-type {
+  margin-top: 4px;
+  padding-top: 0;
+  border-top: none;
+}
+
+.new-project-photo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.new-project-photo-name {
+  font-size: 11px;
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Plain fields in the strategy form (no dark-shell-token classes to
+   override here, unlike EditProjectModal.jsx's title/description/
+   hashtags reuse -- these are new, so they're just styled correctly for
+   this light `.shell-modal` from the start). */
+.new-project-strategy-tab input,
+.new-project-strategy-tab textarea,
+.new-project-strategy-tab select {
+  background: #f5f5f7;
+  color: #1a1a1a;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 6px 8px;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+/* AI content strategy is a Pro-plan feature (no billing system exists
+   yet -- see NewProjectModal.jsx's own doc comment) -- this banner is
+   flashed above the form to show what unlocks it, and `.strategy-form-
+   gated` is the `<fieldset disabled>` wrapping the actual fields: the
+   `disabled` attribute alone already blocks every input/select/textarea/
+   button inside it, opacity+cursor here just make that visually obvious. */
+.strategy-pricing-banner {
+  background: linear-gradient(180deg, #fff8e6, #ffffff);
+  border: 1px solid #f0d98c;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.strategy-pricing-badge {
+  display: inline-block;
+  background: #111;
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+  margin-bottom: 8px;
+}
+
+.strategy-pricing-title {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: #1a1a1a;
+}
+
+.strategy-pricing-sub {
+  margin: 0 0 12px;
+  font-size: 11.5px;
+  color: #666;
+}
+
+.strategy-pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.strategy-pricing-card {
+  position: relative;
+  background: #fff;
+  border: 1px solid #e2e2e2;
+  border-radius: 8px;
+  padding: 12px 8px 10px;
+  text-align: center;
+}
+
+.strategy-pricing-card.highlighted {
+  border-color: #111;
+  box-shadow: 0 0 0 1px #111;
+}
+
+.strategy-pricing-ribbon {
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #111;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.strategy-pricing-plan-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+
+.strategy-pricing-card-subtitle {
+  font-size: 9.5px;
+  color: #888;
+  margin-bottom: 4px;
+}
+
+.strategy-pricing-price {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1a1a1a;
+  margin: 4px 0 2px;
+}
+
+.strategy-pricing-price span {
+  font-size: 10px;
+  font-weight: 400;
+  color: #888;
+}
+
+.strategy-pricing-seconds {
+  font-size: 10px;
+  color: #666;
+  margin-bottom: 6px;
+}
+
+.strategy-pricing-features {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 9.5px;
+  color: #555;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.strategy-pricing-upgrade-btn {
+  width: 100%;
+  background: #111;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 9px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: not-allowed;
+  opacity: 0.85;
+}
+
+.strategy-form-gated {
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  opacity: 0.45;
+  pointer-events: none;
+  cursor: not-allowed;
+  user-select: none;
+}
+
 .more-options-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -1818,11 +2337,6 @@ footer {
   width: 64px;
 }
 
-.add-override-button {
-  display: block;
-  margin-top: 6px;
-}
-
 .caption-override-panel-error {
   color: #c0392b;
   font-size: 12px;
@@ -1834,6 +2348,16 @@ footer {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 12px;
+}
+
+/* Edit-mode only (CaptionOverridePanel's `onRemove` prop) -- pushed to the
+   opposite side from Cancel/Apply via margin-right: auto so a destructive
+   action never sits directly next to Apply, and colored to match this
+   same panel's existing error-red rather than introducing a new color. */
+.caption-override-panel-remove {
+  margin-right: auto;
+  color: #c0392b;
+  border-color: #c0392b;
 }
 
 /* The persistent override list, in MoreOptionsModal.jsx's "style" tab
@@ -2005,9 +2529,57 @@ footer {
 }
 
 .timeline-time-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 11px;
   color: var(--shell-text-dim);
   font-variant-numeric: tabular-nums;
+}
+
+.timeline-time-label-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-pin-button {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--shell-border);
+  background: var(--shell-bg-2);
+  color: var(--shell-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.timeline-pin-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.timeline-pin-button.active {
+  background: #7c3aed;
+  border-color: #7c3aed;
+  color: #fff;
+}
+
+.timeline-transition-plan-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 0;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--shell-text-dim);
+  background: var(--shell-bg-2);
+  border-radius: 6px;
+}
+
+.timeline-transition-plan-message.error {
+  color: #ff6b6b;
 }
 
 .timeline-track {
@@ -2104,6 +2676,36 @@ footer {
   border: 1px dashed #7c3aed;
 }
 
+/* Real burned-into-the-footage effects (zoom punch / flash cut) -- point
+   markers, not ranges, so they live in their own slim `.timeline-overlay-
+   track` row (14px, same convention as the speaker/jumpcut rows above)
+   rather than the full-height lines pins/overrides use, keeping the two
+   concepts visually distinct even when placed at the same moment. */
+.timeline-transition-marker {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  width: 14px;
+  margin-left: -7px;
+  cursor: pointer;
+  border-radius: 3px;
+  background: #f59e0b;
+  opacity: 0.85;
+}
+
+.timeline-transition-marker:hover {
+  opacity: 1;
+}
+
+.timeline-transition-marker-flag {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 9px;
+  line-height: 1;
+}
+
 .timeline-playhead {
   position: absolute;
   top: 0;
@@ -2111,4 +2713,116 @@ footer {
   width: 2px;
   background: var(--shell-accent);
   pointer-events: none;
+}
+
+/* .timeline-track has `overflow: hidden`, so this stays fully inside its
+   bounds (unlike a marker sticking up above the track, which would get
+   clipped) -- a thin line spanning the track's full height plus a small
+   flag glyph at the top, within the ~48px band .timeline-track-row's own
+   `margin-top` already reserves above the word blocks. */
+.timeline-pin-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  margin-left: -8px;
+  cursor: pointer;
+  z-index: 2;
+  opacity: 0.6;
+}
+
+.timeline-pin-marker::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #7c3aed;
+}
+
+.timeline-pin-marker-flag {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* Auto-suggested points -- dashed and dimmer, distinct from a manually
+   dropped pin (solid, 0.6 opacity) -- one click opens the same menu
+   either kind of pin does. */
+.timeline-pin-marker-suggested {
+  opacity: 0.4;
+}
+
+.timeline-pin-marker-suggested::before {
+  background: repeating-linear-gradient(to bottom, #a855f7 0, #a855f7 4px, transparent 4px, transparent 8px);
+}
+
+.timeline-pin-marker-suggested:hover {
+  opacity: 0.8;
+}
+
+/* The click-triggered menu anchored to a suggested marker, an existing
+   override band, a plain pin, or a video-transition marker --
+   `position: fixed` so it escapes .timeline-track's `overflow: hidden`
+   instead of getting clipped, and sits above everything else on the page
+   regardless of which panel it was opened from. `top`/`left` here are the
+   box's own top-left corner, set inline in Timeline.jsx -- NOT a
+   center-anchor needing a `transform` to offset it, on purpose: a
+   transform-based offset can only account for a *guessed* box size, and
+   a real user report showed that guess wasn't reliable (a short window,
+   or a marker near an edge, could still push part of the menu off-screen
+   with no way to reach it). Timeline.jsx instead measures this element's
+   *actual* rendered size after mount (a `useLayoutEffect`) and computes
+   `top`/`left` already clamped fully inside the viewport, so this rule
+   only needs to describe the box's appearance, not its placement. */
+.timeline-popover {
+  position: fixed;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+  padding: 8px;
+  background: var(--shell-bg-1);
+  border: 1px solid var(--shell-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.timeline-popover-title {
+  font-size: 11px;
+  color: var(--shell-text-dim);
+  padding: 0 2px 2px;
+  border-bottom: 1px solid var(--shell-border);
+  margin-bottom: 2px;
+}
+
+.timeline-popover button {
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--shell-border);
+  background: var(--shell-bg-2);
+  color: var(--shell-text);
+  cursor: pointer;
+}
+
+.timeline-popover button:hover {
+  border-color: var(--shell-accent);
+}
+
+.timeline-popover-remove {
+  color: #ff6b6b;
+}
+
+.timeline-popover-dismiss {
+  background: transparent;
+  border-color: transparent;
+  color: var(--shell-text-dim);
 }

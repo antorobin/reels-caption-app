@@ -213,7 +213,7 @@ function stylesAreEqual(a, b) {
 // a separately-stored flag, so it can never drift out of sync with the
 // actual style values (see library.rs's DefaultCaptionStyle doc comment,
 // which this mirrors on the Rust side).
-function displayNameFor(themeId, style) {
+export function displayNameFor(themeId, style) {
   const baseTheme = CAPTION_THEMES.find((t) => t.id === themeId);
   if (!baseTheme) return "Custom";
   return stylesAreEqual(style, baseTheme.style) ? baseTheme.name : `${baseTheme.name} (Custom)`;
@@ -273,11 +273,27 @@ function CaptionStyleEditor({ style, onChange, themeId, onThemeIdChange, onReset
 
       <div className="theme-picker">
         {visibleThemes.map((theme) => (
-          <button key={theme.id} type="button" className="theme-card" onClick={() => pickTheme(theme)} title={theme.description}>
+          <button
+            key={theme.id}
+            type="button"
+            // Persistent "this is the active theme" indicator -- matches
+            // on id alone (not the exact style values), so it stays lit
+            // even once hand-tweaked into a "(Custom)" variant of this
+            // theme, same as `currentName`'s own logic below. Without
+            // this, switching projects and coming back showed the right
+            // style being used but nothing in the grid itself confirmed
+            // which card it came from.
+            className={`theme-card${theme.id === themeId ? " theme-card-selected" : ""}`}
+            onClick={() => pickTheme(theme)}
+            title={theme.description}
+          >
             <span className="theme-card-swatch">
               <ThemeCardPreview themeStyle={theme.style} />
             </span>
-            <span className="theme-card-name">{theme.name}</span>
+            <span className="theme-card-name">
+              {theme.name}
+              {theme.id === themeId && <span className="theme-card-selected-badge">✓</span>}
+            </span>
             <span className="theme-card-description">{theme.description}</span>
           </button>
         ))}

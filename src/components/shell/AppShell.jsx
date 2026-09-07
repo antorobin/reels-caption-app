@@ -1,3 +1,4 @@
+import { useState } from "react";
 import BackgroundJobsBanner from "./BackgroundJobsBanner.jsx";
 import BurnExportButton from "./BurnExportButton.jsx";
 import MainPanel from "./MainPanel.jsx";
@@ -8,16 +9,20 @@ import TranscriptPanel from "./TranscriptPanel.jsx";
 import UpdateBanner from "./UpdateBanner.jsx";
 
 function AppShell(props) {
+  // Lifted here (rather than staying local to MainPanel, where it lived
+  // before) so TranscriptPanel's new "Change theme" link -- a sibling of
+  // MainPanel, not a child -- can open the same modal MainPanel renders.
+  // Always mounts fresh when opened (MoreOptionsModal's own `activeTab`
+  // state defaults to "style"), so this doubles as "always land on the
+  // style tab" for free, without needing a separate initial-tab prop.
+  const [moreOptionsOpen, setMoreOptionsOpen] = useState(false);
+
   return (
     <div className="shell-grid">
       <MenuBar />
 
       <Sidebar
-        videoPath={props.videoPath}
-        originalVideoPath={props.originalVideoPath}
         onPickVideo={props.pickVideo}
-        importing={props.importing}
-        importProgress={props.importProgress}
         currentProjectId={props.currentProjectId}
         onSelectProject={props.loadProject}
         projectTitle={props.projectTitle}
@@ -26,10 +31,11 @@ function AppShell(props) {
         setProjectDescription={props.setProjectDescription}
         projectHashtags={props.projectHashtags}
         setProjectHashtags={props.setProjectHashtags}
-        generatingContentIdeas={props.generatingContentIdeas}
       />
 
       <MainPanel
+        moreOptionsOpen={moreOptionsOpen}
+        setMoreOptionsOpen={setMoreOptionsOpen}
         videoRef={props.videoRef}
         videoPath={props.videoPath}
         currentProjectId={props.currentProjectId}
@@ -50,6 +56,14 @@ function AppShell(props) {
         captionStyleOverrides={props.captionStyleOverrides}
         addCaptionStyleOverride={props.addCaptionStyleOverride}
         removeCaptionStyleOverride={props.removeCaptionStyleOverride}
+        updateCaptionStyleOverride={props.updateCaptionStyleOverride}
+        videoTransitions={props.videoTransitions}
+        addVideoTransition={props.addVideoTransition}
+        updateVideoTransition={props.updateVideoTransition}
+        removeVideoTransition={props.removeVideoTransition}
+        suggestTransitionPlan={props.suggestTransitionPlan}
+        suggestingTransitionPlan={props.suggestingTransitionPlan}
+        transitionPlanError={props.transitionPlanError}
         handleSeek={props.handleSeek}
         handleJumpCutApplied={props.handleJumpCutApplied}
         prosody={props.prosody}
@@ -91,6 +105,9 @@ function AppShell(props) {
         pipelineRunning={props.pipelineRunning}
         pipelineStatus={props.pipelineStatus}
         onTranscribe={props.retranscribe}
+        captionStyle={props.captionStyle}
+        captionThemeId={props.captionThemeId}
+        onOpenStylePicker={() => setMoreOptionsOpen(true)}
       />
 
       <BurnExportButton
@@ -101,6 +118,7 @@ function AppShell(props) {
         disabled={props.words.length === 0}
         lastBurnedPath={props.lastBurnedPath}
         contentIdeas={props.contentIdeas}
+        currentProjectId={props.currentProjectId}
       />
 
       <div className="bottom-left-stack">

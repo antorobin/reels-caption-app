@@ -123,3 +123,183 @@ export function findActiveChunkEntry(chunkTimeline, currentTime) {
 export function overrideRangeOverlaps(start, end, existingOverrides, excludeIndex = -1) {
   return existingOverrides.some((o, i) => i !== excludeIndex && start < o.end && end > o.start);
 }
+
+// Snaps a raw time to the start of whichever word is closest — so a range
+// (whether dragged by hand on Timeline.jsx or auto-suggested below) always
+// lands exactly where a real override boundary takes effect: a word is
+// assigned to a style-timeline piece by its own start time (see
+// buildChunkTimeline above), never split across two pieces.
+export function snapToNearestWordStart(time, words) {
+  if (!words || words.length === 0) return time;
+  let closest = words[0].start;
+  let closestDistance = Math.abs(words[0].start - time);
+  for (const w of words) {
+    const distance = Math.abs(w.start - time);
+    if (distance < closestDistance) {
+      closest = w.start;
+      closestDistance = distance;
+    }
+  }
+  return closest;
+}
+
+// Thresholds for suggestTransitionPoints below. SILENCE_GAP_SECONDS
+// reuses the exact value VideoPreview.jsx's own DUCK_SPEECH_MERGE_GAP_SECONDS
+// already established as "a meaningful gap" in this codebase, rather than
+// inventing a second, potentially-inconsistent number for the same idea.
+const SILENCE_GAP_SECONDS = 0.6;
+const LONG_SILENCE_GAP_SECONDS = 1.5;
+// Candidates from different signals within this many seconds of each
+// other are treated as "the same real moment" and merged into one
+// suggestion, combining their reasons -- multiple signals agreeing is
+// what makes a suggestion higher-confidence, not any one signal alone.
+const MERGE_WINDOW_SECONDS = 0.5;
+const PACE_WINDOW_SECONDS = 3.0;
+const PACE_CHANGE_RATIO = 1.6;
+const MAX_SUGGESTIONS = 12;
+
+// A fourth signal alongside speaker changes/silence/prosody (all reused
+// from data this app already computes): local speaking-rate shifts,
+// comparing words-per-second just before vs. just after each word purely
+// from existing timestamps, no new analysis pass needed. A sudden
+// speedup/slowdown often marks a real tonal or topical shift (e.g.
+// energetic hook -> measured explanation) that the other three signals
+// can miss entirely if the speaker, pauses, and vocal emphasis all stay
+// flat through it.
+function detectPaceChanges(words) {
+  const candidates = [];
+  for (let i = 1; i < words.length; i++) {
+    const t = words[i].start;
+    const before = words.filter((w) => w.start >= t - PACE_WINDOW_SECONDS && w.start < t).length / PACE_WINDOW_SECONDS;
+    const after = words.filter((w) => w.start >= t && w.start < t + PACE_WINDOW_SECONDS).length / PACE_WINDOW_SECONDS;
+    // Too sparse a window (near a clip edge, or inside a long silence
+    // already flagged by the gap signal) to trust a rate ratio from.
+    if (before < 0.5 || after < 0.5) continue;
+    const ratio = after / before;
+    if (ratio >= PACE_CHANGE_RATIO) candidates.push({ time: t, reason: "Speeds up" });
+    else if (ratio <= 1 / PACE_CHANGE_RATIO) candidates.push({ time: t, reason: "Slows down" });
+  }
+  return candidates;
+}
+
+// Suggests candidate points for a style-override pin by combining four
+// signals, all computed purely from data this app already has (no new
+// backend analysis): diarized speaker changes, silence/pause gaps,
+// prosody-driven vocal-emphasis jumps into "high" intensity, and local
+// speaking-pace shifts (above). Nearby candidates from different signals
+// are merged into one suggestion whose `confidence` is how many distinct
+// signals agreed on roughly that moment -- a speaker change that also
+// lands on a long pause is a much stronger transition candidate than
+// either alone. Suggestions landing inside an already-styled override are
+// dropped (nothing useful to suggest there), and the result is capped so
+// a long video's timeline doesn't get cluttered with dozens of markers.
+export function suggestTransitionPoints(words, speakers, prosody, existingOverrides = []) {
+  const raw = [];
+
+  const sortedSpeakers = [...speakers].sort((a, b) => a.start - b.start);
+  for (let i = 1; i < sortedSpeakers.length; i++) {
+    if (sortedSpeakers[i].speaker_id !== sortedSpeakers[i - 1].speaker_id) {
+      // Carries which speaker is *starting* here -- autoThemeIdForSuggestion
+      // (themes.js) uses this to rotate through a small set of themes keyed
+      // by speaker, not just note that "a change" happened.
+      raw.push({ time: sortedSpeakers[i].start, reason: "Speaker change", speakerId: sortedSpeakers[i].speaker_id });
+    }
+  }
+
+  for (let i = 1; i < words.length; i++) {
+    const gap = words[i].start - words[i - 1].end;
+    if (gap >= LONG_SILENCE_GAP_SECONDS) raw.push({ time: words[i].start, reason: "Long pause" });
+    else if (gap >= SILENCE_GAP_SECONDS) raw.push({ time: words[i].start, reason: "Pause" });
+  }
+
+  const sortedProsody = [...prosody].sort((a, b) => a.start - b.start);
+  for (let i = 1; i < sortedProsody.length; i++) {
+    if (sortedProsody[i].intensity === "high" && sortedProsody[i - 1].intensity !== "high") {
+      raw.push({ time: sortedProsody[i].start, reason: "Emphasis" });
+    }
+  }
+
+  raw.push(...detectPaceChanges(words));
+
+  if (raw.length === 0) return [];
+
+  raw.sort((a, b) => a.time - b.time);
+  const merged = [];
+  for (const c of raw) {
+    const last = merged[merged.length - 1];
+    if (last && c.time - last.time <= MERGE_WINDOW_SECONDS) {
+      if (!last.reasons.includes(c.reason)) last.reasons.push(c.reason);
+      if (c.speakerId != null) last.speakerId = c.speakerId;
+    } else {
+      merged.push({ time: c.time, reasons: [c.reason], speakerId: c.speakerId ?? null });
+    }
+  }
+
+  return merged
+    .filter((m) => !existingOverrides.some((o) => m.time >= o.start && m.time < o.end))
+    .map((m) => ({
+      time: snapToNearestWordStart(m.time, words),
+      reasons: m.reasons,
+      speakerId: m.speakerId,
+      confidence: m.reasons.length,
+    }))
+    .sort((a, b) => b.confidence - a.confidence || a.time - b.time)
+    .slice(0, MAX_SUGGESTIONS)
+    .sort((a, b) => a.time - b.time);
+}
+
+// Default duration for an auto-applied override (no explicit end point
+// given, unlike a hand-dragged range) -- long enough to read as a real
+// stylistic beat, short enough not to swallow whatever comes next by
+// default.
+const AUTO_RANGE_DEFAULT_SPAN_SECONDS = 4;
+
+// Determines the [start, end) range for one-click "auto-apply" on a
+// suggestion -- extends from the suggestion's own time for
+// AUTO_RANGE_DEFAULT_SPAN_SECONDS, but never past whatever the *next*
+// suggestion in the same list is (so auto-applying one transition
+// doesn't silently swallow the next one before the user gets to react to
+// it), and never past the video's own end.
+export function autoRangeForSuggestion(time, allSuggestions, duration) {
+  const next = allSuggestions.find((s) => s.time > time + 1.0);
+  const uncappedEnd = time + AUTO_RANGE_DEFAULT_SPAN_SECONDS;
+  const cappedEnd = next && next.time < uncappedEnd ? next.time : uncappedEnd;
+  return { start: time, end: Math.min(cappedEnd, duration) };
+}
+
+// Display name for each entry in video_transitions.rs's effect library --
+// shared by every place that renders one (Timeline.jsx's popovers and
+// marker tooltips, MoreOptionsModal.jsx's list), so a new effect only
+// needs a label added here, not a ternary updated in three files.
+export const TRANSITION_EFFECT_LABELS = {
+  "zoom-punch": "🎬 Zoom punch",
+  "flash-cut": "🎬 Flash cut",
+  shake: "🎬 Shake",
+  "color-pulse": "🎬 Color pulse",
+};
+
+// Same rule-based approach as themes.js's autoThemeIdForSuggestion, not a
+// model -- picking one of a small, fixed set of categorical options from
+// signals suggestTransitionPoints already computed (speaker change, pace,
+// pause, emphasis) is a plain priority-ordered mapping, not an open-ended
+// generation task; there's no real training data for "which transition
+// effect is best" and a rule encodes the same editorial logic a model
+// would have to learn anyway. Kept here (not themes.js) since it's about
+// video_transitions.rs's effect library, not caption styling.
+//
+// The editorial logic, now spread across all four effects: a flash cut is
+// the traditional hard-punctuation mark between two different speakers or
+// during a quiet beat -- brief, low-energy. A zoom punch rides *rising*
+// energy -- vocal emphasis, the clearest "lean in" moment. A shake is a
+// jarring, kinetic jolt -- a better match for a sudden pace speedup than
+// zoom's smoother push-in. A color pulse (a brief desaturate) reads as a
+// tonal/mood shift -- a gentler fit for slowing down than a flash's
+// abruptness.
+export function autoTransitionEffectForSuggestion(reasons) {
+  if (reasons.includes("Emphasis")) return "zoom-punch";
+  if (reasons.includes("Speaker change")) return "flash-cut";
+  if (reasons.includes("Speeds up")) return "shake";
+  if (reasons.includes("Slows down")) return "color-pulse";
+  if (reasons.includes("Long pause") || reasons.includes("Pause")) return "flash-cut";
+  return "zoom-punch";
+}

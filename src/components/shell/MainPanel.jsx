@@ -3,6 +3,7 @@ import VideoPreview from "../VideoPreview.jsx";
 import ContentIdeasPanel from "../tools/ContentIdeasPanel.jsx";
 import DuckingPanel from "../tools/DuckingPanel.jsx";
 import LoudnessPanel from "../tools/LoudnessPanel.jsx";
+import { CAPTION_THEMES } from "../../lib/themes.js";
 import CaptionOverridePanel from "./CaptionOverridePanel.jsx";
 import LiveDictationPanel from "./LiveDictationPanel.jsx";
 import MoreOptionsModal from "./MoreOptionsModal.jsx";
@@ -12,17 +13,45 @@ import TranscribeStatus from "./TranscribeStatus.jsx";
 import VoiceoverSection from "./VoiceoverSection.jsx";
 
 function MainPanel(props) {
-  const [moreOptionsOpen, setMoreOptionsOpen] = useState(false);
-  // A range just dragged on the Timeline, waiting for the user to pick a
-  // style for it (or cancel) via CaptionOverridePanel below -- local to
+  // Lifted to AppShell.jsx so TranscriptPanel's "Change theme" link (a
+  // sibling of this component) can open the same modal -- see its own
+  // doc comment there.
+  const { moreOptionsOpen, setMoreOptionsOpen } = props;
+  // A range just selected (either dragged directly on Timeline, or from
+  // its "🎨 Add caption style" pin action), waiting for the user to pick
+  // a style for it (or cancel) via CaptionOverridePanel below -- local to
   // this component since it's a transient UI-only step, never itself
   // persisted (only the finished override, once Applied, is).
   const [pendingRange, setPendingRange] = useState(null);
+  // Set only by the pin action, when the clicked pin came with known
+  // "reasons" (a suggestion) -- seeds CaptionOverridePanel's draft with
+  // the auto-picked theme for that reason instead of the project's plain
+  // base style, so "Add caption style" starts from a good guess without
+  // needing its own separate one-click "auto-apply" action. `null` for
+  // every other entry point (a direct drag, a plain pin with no reasons
+  // to guess from), which falls back to the base style as it always has.
+  const [pendingSeedThemeId, setPendingSeedThemeId] = useState(null);
+  // Index into captionStyleOverrides currently open for editing (via the
+  // Timeline popover's "Change style" action) -- mutually exclusive with
+  // pendingRange; opening either one closes the other so only one
+  // CaptionOverridePanel is ever on screen at once.
+  const [editingIndex, setEditingIndex] = useState(null);
+  const editingOverride = editingIndex != null ? props.captionStyleOverrides?.[editingIndex] : null;
+
+  // Single entry point for both ways of starting a create-flow (a direct
+  // drag, or a pin's "🎨 Add caption style") -- both just want the same
+  // panel opened over the same range, one of them also carrying a seed
+  // theme guess.
+  function openCreatePanel(start, end, seedThemeId = null) {
+    setEditingIndex(null);
+    setPendingRange({ start, end });
+    setPendingSeedThemeId(seedThemeId);
+  }
 
   if (!props.videoPath) {
     return (
       <div className="shell-main-panel">
-        <p className="shell-viewer-empty">Choose a video from the Media Pool to get started.</p>
+        <p className="shell-viewer-empty">Click the + next to "Projects" to upload a video, or open a project from the list to get started.</p>
       </div>
     );
   }
@@ -40,6 +69,7 @@ function MainPanel(props) {
           words={props.words}
           captionStyle={props.captionStyle}
           captionStyleOverrides={props.captionStyleOverrides}
+          videoTransitions={props.videoTransitions}
           onTimeUpdate={props.setCurrentTime}
           onLoadedMetadata={props.setDuration}
           onSeek={props.handleSeek}
@@ -59,6 +89,14 @@ function MainPanel(props) {
           />
 
           <div className="main-panel-timeline">
+            {/* Two ways to start an override, both ending in the same
+                openCreatePanel call below: click a pin's "🎨 Add caption
+                style" (any pin -- an auto-suggested point, a manually
+                dropped one, or the timeline's own "📍 Pin a style
+                override" button), or skip pins entirely and drag directly
+                on the waveform -- the pin path is the more discoverable,
+                editor-like route; the direct drag stays as a fast path
+                for anyone who doesn't bother with it. */}
             <Timeline
               videoPath={props.videoPath}
               words={props.words}
@@ -68,41 +106,61 @@ function MainPanel(props) {
               prosody={props.prosody}
               speakers={props.speakers}
               captionStyleOverrides={props.captionStyleOverrides}
-              onRangeSelected={(start, end) => setPendingRange({ start, end })}
+              videoTransitions={props.videoTransitions}
+              onAddVideoTransition={(time, effect) => props.addVideoTransition({ time, effect })}
+              onUpdateVideoTransition={(index, transition) => props.updateVideoTransition(index, transition)}
+              onRemoveVideoTransition={(index) => props.removeVideoTransition(index)}
+              onSuggestTransitionPlan={(candidates) => props.suggestTransitionPlan(candidates, props.currentProjectId)}
+              suggestingTransitionPlan={props.suggestingTransitionPlan}
+              onRangeSelected={(start, end) => openCreatePanel(start, end)}
+              onAddCaptionStyle={(start, end, seedThemeId) => openCreatePanel(start, end, seedThemeId)}
+              onEditOverride={(index) => {
+                setPendingRange(null);
+                setEditingIndex(index);
+              }}
+              onRemoveOverride={(index) => props.removeCaptionStyleOverride(index)}
             />
-            {/* Second, explicit way to start an override (alongside
-                dragging directly on the waveform above) -- a drag gesture
-                on a waveform isn't something everyone would think to try
-                unprompted. Defaults to a short window starting at the
-                current playhead position; Apply/Cancel and the same
-                overlap check work identically either way. */}
-            {props.duration > 0 && (
-              <button
-                type="button"
-                className="link-button add-override-button"
-                onClick={() => {
-                  const defaultSpan = Math.min(3, props.duration);
-                  const start = Math.min(props.currentTime, Math.max(0, props.duration - defaultSpan));
-                  setPendingRange({ start, end: Math.min(start + defaultSpan, props.duration) });
-                }}
-              >
-                + Add a style override for this portion
-              </button>
-            )}
           </div>
 
-          {pendingRange && (
+          {pendingRange &&
+            (() => {
+              // A seed theme (from a pin with known "reasons") pre-fills
+              // the draft with that guess instead of the project's plain
+              // base style -- see pendingSeedThemeId's own doc comment.
+              const seedTheme = pendingSeedThemeId ? CAPTION_THEMES.find((t) => t.id === pendingSeedThemeId) : null;
+              return (
+                <CaptionOverridePanel
+                  range={pendingRange}
+                  duration={props.duration}
+                  baseStyle={seedTheme ? { ...seedTheme.style } : props.captionStyle}
+                  baseThemeId={seedTheme ? seedTheme.id : props.captionThemeId}
+                  existingOverrides={props.captionStyleOverrides}
+                  onApply={(override) => {
+                    props.addCaptionStyleOverride(override);
+                    setPendingRange(null);
+                  }}
+                  onCancel={() => setPendingRange(null)}
+                />
+              );
+            })()}
+
+          {editingOverride && (
             <CaptionOverridePanel
-              range={pendingRange}
+              range={{ start: editingOverride.start, end: editingOverride.end }}
               duration={props.duration}
-              baseStyle={props.captionStyle}
-              baseThemeId={props.captionThemeId}
+              baseStyle={editingOverride.style}
+              baseThemeId={editingOverride.themeId}
               existingOverrides={props.captionStyleOverrides}
+              excludeIndex={editingIndex}
               onApply={(override) => {
-                props.addCaptionStyleOverride(override);
-                setPendingRange(null);
+                props.updateCaptionStyleOverride(editingIndex, override);
+                setEditingIndex(null);
               }}
-              onCancel={() => setPendingRange(null)}
+              onCancel={() => setEditingIndex(null)}
+              onRemove={() => {
+                props.removeCaptionStyleOverride(editingIndex);
+                setEditingIndex(null);
+              }}
             />
           )}
 
@@ -167,6 +225,8 @@ function MainPanel(props) {
           onResetCaptionStyleToFactoryDefault={props.resetCaptionStyleToFactoryDefault}
           captionStyleOverrides={props.captionStyleOverrides}
           onRemoveCaptionStyleOverride={props.removeCaptionStyleOverride}
+          videoTransitions={props.videoTransitions}
+          onRemoveVideoTransition={props.removeVideoTransition}
           prosody={props.prosody}
           analyzingProsody={props.analyzingProsody}
           prosodyStatus={props.prosodyStatus}

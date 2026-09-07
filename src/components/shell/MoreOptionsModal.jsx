@@ -1,11 +1,11 @@
 import { useState } from "react";
-import CaptionStyleEditor from "../CaptionStyleEditor.jsx";
+import CaptionStyleEditor, { displayNameFor } from "../CaptionStyleEditor.jsx";
 import SilenceRemovalPanel from "../SilenceRemovalPanel.jsx";
 import DiarizePanel from "../tools/DiarizePanel.jsx";
 import KeywordsPanel from "../tools/KeywordsPanel.jsx";
 import ProsodyPanel from "../tools/ProsodyPanel.jsx";
 import VoSyncPanel from "../tools/VoSyncPanel.jsx";
-import { CAPTION_THEMES } from "../../lib/themes.js";
+import { TRANSITION_EFFECT_LABELS } from "../../lib/captions.js";
 import { formatTime } from "../../lib/time.js";
 
 const TABS = [
@@ -33,6 +33,8 @@ function MoreOptionsModal({
   onResetCaptionStyleToFactoryDefault,
   captionStyleOverrides = [],
   onRemoveCaptionStyleOverride,
+  videoTransitions = [],
+  onRemoveVideoTransition,
   ...toolProps
 }) {
   const [activeTab, setActiveTab] = useState("style");
@@ -81,8 +83,31 @@ function MoreOptionsModal({
                       <span>
                         {formatTime(o.start)} – {formatTime(o.end)}
                       </span>
-                      <span>{CAPTION_THEMES.find((t) => t.id === o.themeId)?.name || "Custom"}</span>
+                      {/* displayNameFor, not a raw CAPTION_THEMES lookup -- so a
+                          hand-tweaked override reads "<Theme> (Custom)" here too,
+                          matching Timeline.jsx's own tooltip/popover for the same
+                          override instead of silently showing just the base
+                          theme's name as if nothing had been changed. */}
+                      <span>{displayNameFor(o.themeId, o.style)}</span>
                       <button type="button" className="link-button" onClick={() => onRemoveCaptionStyleOverride(i)}>
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {videoTransitions.length > 0 && (
+                <div className="caption-override-list">
+                  <h3>Video transitions</h3>
+                  <p className="section-hint">
+                    Real effects burned into the footage itself, added from a pin's menu on the timeline above — not part of the caption
+                    style. Captions stay fully readable through any of them.
+                  </p>
+                  {videoTransitions.map((t, i) => (
+                    <div key={i} className="caption-override-list-row">
+                      <span>{formatTime(t.time)}</span>
+                      <span>{TRANSITION_EFFECT_LABELS[t.effect] || t.effect}</span>
+                      <button type="button" className="link-button" onClick={() => onRemoveVideoTransition(i)}>
                         Remove
                       </button>
                     </div>

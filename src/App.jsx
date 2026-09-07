@@ -71,6 +71,10 @@ function projectSliceFromProject(project) {
     // start a new video with," which has no meaning for "a style that
     // only applies to seconds 12-18 of THIS video").
     captionStyleOverrides: state.captionStyleOverrides || [],
+    // Real burned-into-the-footage effects (zoom punch / flash cut) at a
+    // point in time -- also per-project only, for the same reason as
+    // captionStyleOverrides just above.
+    videoTransitions: state.videoTransitions || [],
     prosody: state.prosody || [],
     speakers: state.speakers || [],
     voiceoverPath: state.voiceoverPath || "",
@@ -110,6 +114,7 @@ function projectPayloadFrom(slice, overrides = {}) {
       captionStyle: slice.captionStyle,
       captionThemeId: slice.captionThemeId,
       captionStyleOverrides: slice.captionStyleOverrides,
+      videoTransitions: slice.videoTransitions,
       prosody: slice.prosody,
       speakers: slice.speakers,
       voiceoverPath: slice.voiceoverPath,
@@ -126,7 +131,7 @@ function projectPayloadFrom(slice, overrides = {}) {
 
 // Registered once for the app's whole lifetime (not per-render, not per-
 // component-instance) -- every `upsertProjectSlice`/`setProjectSlice` call
-// anywhere triggers autosave/reembed automatically through this, so no
+// anywhere triggers autosave automatically through this, so no
 // call site (background job or synchronous UI edit alike) has to
 // remember to schedule a save itself. See projectStore.js's own doc
 // comment on `configureAutosave` for why this is safer than the
@@ -159,6 +164,7 @@ function App() {
     captionStyle,
     captionThemeId,
     captionStyleOverrides,
+    videoTransitions,
     prosody,
     speakers,
     voiceoverPath,
@@ -190,6 +196,8 @@ function App() {
   const burnProgress = jobs.burn.progress;
   const generatingContentIdeas = jobs.contentIdeas.running;
   const contentIdeasError = jobs.contentIdeas.error;
+  const suggestingTransitionPlan = jobs.transitionPlan.running;
+  const transitionPlanError = jobs.transitionPlan.error;
 
   // Convenience setters bound to *whichever project is currently
   // displayed* -- safe only for synchronous, user-driven edits made while
@@ -216,6 +224,32 @@ function App() {
     patchCurrentProject((prev) => ({ captionStyleOverrides: [...(prev.captionStyleOverrides || []), override] }));
   const removeCaptionStyleOverride = (index) =>
     patchCurrentProject((prev) => ({ captionStyleOverrides: (prev.captionStyleOverrides || []).filter((_, i) => i !== index) }));
+  // Replaces one existing override in place (its range and/or style) --
+  // "Change style" on an already-applied override, as opposed to
+  // addCaptionStyleOverride's "add a new one" -- same non-overlap
+  // guarantee already holds since the edited range's own overlap check
+  // (CaptionOverridePanel.jsx, excluding this override's own index) ran
+  // before this is ever called.
+  const updateCaptionStyleOverride = (index, override) =>
+    patchCurrentProject((prev) => ({
+      captionStyleOverrides: (prev.captionStyleOverrides || []).map((o, i) => (i === index ? override : o)),
+    }));
+  // A real burned-into-the-footage effect at a point in time -- see
+  // video_transitions.rs. `{ time, effect }` where effect is one of
+  // "zoom-punch" | "flash-cut" | "shake" | "color-pulse", matching
+  // TransitionEffect's #[serde(rename_all = "kebab-case")] on the Rust
+  // side exactly.
+  const addVideoTransition = (transition) =>
+    patchCurrentProject((prev) => ({ videoTransitions: [...(prev.videoTransitions || []), transition] }));
+  const removeVideoTransition = (index) =>
+    patchCurrentProject((prev) => ({ videoTransitions: (prev.videoTransitions || []).filter((_, i) => i !== index) }));
+  // Changes an existing transition's own effect in place (its "Edit
+  // transition" action) -- same non-add/non-remove shape as
+  // updateCaptionStyleOverride above.
+  const updateVideoTransition = (index, transition) =>
+    patchCurrentProject((prev) => ({
+      videoTransitions: (prev.videoTransitions || []).map((t, i) => (i === index ? transition : t)),
+    }));
   const setContentHints = (v) => patchCurrentProject({ contentHints: v });
   const setProjectTitle = (v) => patchCurrentProject({ title: v });
   const setProjectDescription = (v) => patchCurrentProject({ description: v });
@@ -436,7 +470,7 @@ function App() {
   // the project view rather than as a per-row action in the sidebar list,
   // with its own confirmation. Removes its slice from the store entirely
   // (rather than resetting fields back to blank) and cancels any pending
-  // autosave/reembed timer for it, so a stale timer can't try to save a
+  // autosave timer for it, so a stale timer can't try to save a
   // project that no longer exists a moment later.
   async function deleteCurrentProject() {
     if (!currentProjectId) return;
@@ -689,6 +723,47 @@ function App() {
     patchCurrentProject({ contentIdeas: option });
   }
 
+  // LLM-refined transition planning (transition_planner.rs) -- given the
+  // heuristic's own candidate points (Timeline.jsx's suggestTransitionPoints,
+  // times only; the backend re-derives everything else including which
+  // ones actually deserve a transition from the real transcript text),
+  // adds a real VideoTransition for whichever ones the model kept. Writes
+  // through `upsertProjectSlice(forProjectId, ...)` directly rather than
+  // `addVideoTransition` (bound to `patchCurrentProject`, i.e. whichever
+  // project is *currently displayed*) -- this is an async, several-second
+  // LLM call, so the same "never assume the project you started this for
+  // is still the one on screen when it resolves" rule as
+  // generateContentIdeas/runPipelineFor applies here too. Returns the
+  // accepted entries so the caller can show a real count, not just "done."
+  async function suggestTransitionPlan(candidates, forProjectId = currentProjectId) {
+    if (!forProjectId || candidates.length === 0) return [];
+    const targetSlice = getState().projects[forProjectId];
+    const wordsToUse = targetSlice?.words ?? [];
+    if (wordsToUse.length === 0) return [];
+    upsertProjectJob(forProjectId, "transitionPlan", { running: true, error: "" });
+    try {
+      const result = await invoke("suggest_transition_plan", {
+        words: wordsToUse,
+        speakers: targetSlice?.speakers ?? [],
+        candidates: candidates.map((c) => ({ time: c.time })),
+        language: targetSlice?.detectedLanguage || null,
+      });
+      if (result.length > 0) {
+        const current = getState().projects[forProjectId]?.videoTransitions || [];
+        upsertProjectSlice(forProjectId, {
+          videoTransitions: [...current, ...result.map((entry) => ({ time: entry.time, effect: entry.effect }))],
+        });
+        flushProjectSave(forProjectId);
+      }
+      return result;
+    } catch (err) {
+      upsertProjectJob(forProjectId, "transitionPlan", { error: String(err) });
+      throw err;
+    } finally {
+      upsertProjectJob(forProjectId, "transitionPlan", { running: false });
+    }
+  }
+
   // "Record from mic" without the "also use as voice-over" checkbox
   // (VoiceoverSection.jsx) -- replaces the transcript from freshly
   // recorded speech without touching the video's own audio or an already
@@ -749,6 +824,10 @@ function App() {
       // override range wouldn't just be slightly off, it would apply the
       // wrong theme to entirely the wrong words.
       captionStyleOverrides: [],
+      // Same staleness reasoning again -- a transition's absolute `time`
+      // would land on whatever now happens to sit at that timestamp in
+      // the re-cut video, not the moment it was actually placed for.
+      videoTransitions: [],
     });
     upsertProjectJob(forProjectId, "contentIdeas", { error: "" });
     if (forProjectId === currentProjectId) {
@@ -789,6 +868,7 @@ function App() {
         prosody,
         speakers,
         overrides: captionStyleOverrides,
+        videoTransitions: videoTransitions.map((t) => ({ time: t.time, effect: t.effect })),
         voiceoverPath: voiceoverPath || null,
         voiceoverOffsetSeconds: voiceoverPath ? voiceoverOffset : null,
         projectId: forProjectId,
@@ -857,6 +937,14 @@ function App() {
       captionStyleOverrides={captionStyleOverrides}
       addCaptionStyleOverride={addCaptionStyleOverride}
       removeCaptionStyleOverride={removeCaptionStyleOverride}
+      updateCaptionStyleOverride={updateCaptionStyleOverride}
+      videoTransitions={videoTransitions}
+      addVideoTransition={addVideoTransition}
+      updateVideoTransition={updateVideoTransition}
+      removeVideoTransition={removeVideoTransition}
+      suggestTransitionPlan={suggestTransitionPlan}
+      suggestingTransitionPlan={suggestingTransitionPlan}
+      transitionPlanError={transitionPlanError}
       burnStatus={burnStatus}
       burning={burning}
       burnProgress={burnProgress}

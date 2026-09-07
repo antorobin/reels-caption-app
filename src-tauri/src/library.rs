@@ -14,11 +14,28 @@
 // `cargo build` against this project's MinGW/GNU toolchain before writing
 // any code around it, the same discipline every other native-library
 // dependency in this project has needed since sherpa-onnx's MSVC-only
-// prebuilt library became a real, confirmed build blocker). SQLite (not
-// the flat-JSON-file pattern scheduler.rs/instagram.rs use elsewhere) is
-// the deliberate choice here specifically because a later phase adds local
-// vector/cosine search over this same data (via the `sqlite-vec`
-// extension) -- something a flat JSON file has no path to at all.
+// prebuilt library became a real, confirmed build blocker).
+//
+// Search was originally semantic (cosine-similarity over
+// `sentence-transformers` embeddings, via the `sqlite-vec` extension and a
+// Python embedding server this app had to keep warm). Replaced with
+// SQLite's own built-in FTS5 full-text index, requested directly (real,
+// fast keyword/prefix search over title/description/hashtags/transcript,
+// no vector search) -- verified directly, not assumed, via a standalone
+// probe before writing any code around it (same discipline the original
+// sqlite-vec integration used): confirmed FTS5 is compiled into this
+// exact `rusqlite = { version = "0.32", features = ["bundled"] }` with no
+// extra feature flag needed, confirmed `bm25()` ranking and prefix
+// queries (`"term"*`) work, and confirmed a query-sanitization scheme
+// (wrap every whitespace-split term in escaped double quotes plus a
+// trailing `*`) survives FTS5's special query-syntax characters
+// (apostrophes, hyphens, a lone `"`) without erroring. This is a strict
+// improvement over the embedding-based version, not just a simplification:
+// no Python process to keep warm, no ~19s model-load latency on first
+// search, no separate re-embed step to keep in sync after every edit --
+// the FTS index updates synchronously, in the same SQL transaction, as
+// part of the exact same `insert_project`/`update_project_row` calls that
+// already run on every save.
 //
 // The `projects` table stays deliberately thin: only what the project
 // *list* itself needs to render/sort/search (id, paths, title/description/
@@ -32,6 +49,9 @@
 // frontend through a typed Rust struct isn't free, and an opaque blob
 // sidesteps needing that (and three other structs) to grow a second,
 // Rust-side mirror that has to stay in lockstep with the JS shape forever.
+// (Same reasoning is why the frontend, not this module, derives a
+// project's display *status* -- pending/transcribed/burned/etc. -- from
+// that same opaque `state`; see projectStatus.js.)
 //
 // A connection is opened fresh per command rather than held in shared
 // Tauri-managed state -- these are small, infrequent operations (list a
@@ -41,37 +61,12 @@
 // on top of it. This mirrors scheduler.rs's own "load whole file, mutate,
 // save whole file" simplicity, just backed by SQLite instead of JSON.
 
-use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Once;
 use tauri::{AppHandle, Manager};
-use zerocopy::AsBytes;
 
 use crate::util::{cli_path, emit_progress};
-
-/// all-MiniLM-L6-v2's native output size (embeddings.rs) -- fixed at the
-/// vec0 virtual table's schema level, so this has to be a real constant,
-/// not a runtime value.
-const EMBEDDING_DIM: usize = 384;
-
-static VEC_EXTENSION_REGISTERED: Once = Once::new();
-
-/// Registers sqlite-vec's `vec0` virtual table type with SQLite's global
-/// auto-extension mechanism -- process-wide, not per-connection, so this
-/// only ever needs to run once no matter how many `open_db` calls follow
-/// (this module opens a fresh connection per command, see this module's own
-/// doc comment above). Verified directly via a standalone probe (a real
-/// `vec0` table, real cosine-distance KNN query, correct ranking) before
-/// wiring this in -- see Cargo.toml's own comment on the `sqlite-vec` entry.
-fn ensure_vec_extension_registered() {
-    VEC_EXTENSION_REGISTERED.call_once(|| unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        )));
-    });
-}
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| format!("Couldn't resolve app data directory: {e}"))?;
@@ -106,33 +101,40 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             storage_location TEXT NOT NULL DEFAULT 'local',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
+            exported_at INTEGER,
+            published_at INTEGER,
             state TEXT NOT NULL
         )",
         (),
     )
     .map_err(|e| format!("Couldn't initialize library database: {e}"))?;
 
-    // vec0 tables can only hold an integer rowid, but project ids are hex
-    // strings (generate_id()) -- this mapping table is the bridge between
-    // the two, an autoincrementing surrogate key rather than hashing the id
-    // string (a hash risks collisions this app would have no way to detect;
-    // an autoincrement key can't collide by construction).
+    // `exported_at`/`published_at` were added after this table already
+    // shipped -- `CREATE TABLE IF NOT EXISTS` above only applies to a
+    // brand-new database, so an existing one needs these columns added
+    // explicitly. SQLite has no `ADD COLUMN IF NOT EXISTS`; the "duplicate
+    // column name" error this throws on every run *after* the first is
+    // the documented way to make this idempotent, so it's deliberately
+    // swallowed rather than propagated.
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN exported_at INTEGER", ());
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN published_at INTEGER", ());
+
+    // Full-text index over exactly what a keyword search should match --
+    // kept as a separate FTS5 table (not a `content=` table shadowing
+    // `projects` directly) since the indexed text (a transcript excerpt)
+    // isn't a real column on `projects` itself, and because keeping it
+    // fully external, rebuilt explicitly by `sync_fts_index` after every
+    // insert/update, means a `projects` schema change never risks silently
+    // breaking the FTS table's own column mapping. `project_id UNINDEXED`
+    // is stored but never matched against -- it's how a ranked hit is
+    // mapped back to a real `projects` row.
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS project_vec_ids (
-            vec_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id TEXT NOT NULL UNIQUE
+        "CREATE VIRTUAL TABLE IF NOT EXISTS projects_fts USING fts5(
+            project_id UNINDEXED, title, description, hashtags, transcript
         )",
         (),
     )
-    .map_err(|e| format!("Couldn't initialize embedding id table: {e}"))?;
-
-    conn.execute(
-        &format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS project_vecs USING vec0(embedding float[{EMBEDDING_DIM}] distance_metric=cosine)"
-        ),
-        (),
-    )
-    .map_err(|e| format!("Couldn't initialize embedding search table: {e}"))?;
+    .map_err(|e| format!("Couldn't initialize full-text search table: {e}"))?;
 
     // Small generic per-user key/value store -- deliberately not one table
     // per setting; today's only occupant is `default_caption_style` (the
@@ -157,7 +159,6 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
 }
 
 fn open_db(app: &AppHandle) -> Result<Connection, String> {
-    ensure_vec_extension_registered();
     let conn = Connection::open(db_path(app)?).map_err(|e| format!("Couldn't open library database: {e}"))?;
     // Real, if rare, concurrent access is possible: an autosave tick and a
     // list refresh landing at nearly the same instant. A short busy
@@ -191,6 +192,20 @@ pub struct Project {
     pub storage_location: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Set once, the first time `export_file` successfully copies this
+    /// project's burned output out to a user-picked destination -- distinct
+    /// from `last_burned_path` (which only means "a burn happened," not
+    /// "the user ever took it out of the app"). Never cleared automatically
+    /// by a later re-burn; a re-export just re-stamps it. Purely a display
+    /// signal for `projectStatus.js` -- nothing else in this app reads it.
+    #[serde(default)]
+    pub exported_at: Option<i64>,
+    /// Set once, the first time a post using this project's video
+    /// successfully goes out via `post_to_instagram_now`/scheduling
+    /// (instagram.rs) -- same "stamp once, never auto-clear" shape as
+    /// `exported_at` above, and the same purely-a-display-signal role.
+    #[serde(default)]
+    pub published_at: Option<i64>,
     /// Opaque to Rust -- see this module's own doc comment above. The
     /// frontend assembles/reads this; Rust only ever stores and returns it
     /// verbatim.
@@ -216,6 +231,8 @@ fn project_from_row(row: &rusqlite::Row) -> rusqlite::Result<Project> {
         storage_location: row.get("storage_location")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        exported_at: row.get("exported_at")?,
+        published_at: row.get("published_at")?,
         state: serde_json::from_str(&state_json).unwrap_or(serde_json::json!({})),
     })
 }
@@ -310,6 +327,8 @@ pub async fn create_project(app: AppHandle, video_path: String) -> Result<Projec
         storage_location: default_storage_location(),
         created_at: now,
         updated_at: now,
+        exported_at: None,
+        published_at: None,
         state: serde_json::json!({}),
     };
 
@@ -318,14 +337,113 @@ pub async fn create_project(app: AppHandle, video_path: String) -> Result<Projec
     Ok(project)
 }
 
+/// Creates *or updates* a project row for an AI content-strategy
+/// *draft* -- no video exists yet, only a plan for one (a future
+/// cloud-API generation feature this only collects the parameters for;
+/// see `state.contentStrategyDraft` below). One command handles both
+/// (`id: None` creates, `id: Some(existing)` updates in place) rather
+/// than a separate update path, specifically so both go through the same
+/// character-photo handling below -- a naive direct `save_project` call
+/// for the edit case would let a *changed* reference photo's raw OS path
+/// leak into `state` unconverted, since only this command's own copy step
+/// ever turns a raw picker path into a real, app-managed one.
+///
+/// Deliberately a separate command from `create_project` rather than
+/// teaching it to accept an optional video: `create_project`'s own
+/// already-tested "copy a real file, stamp its path" behavior stays
+/// completely untouched, and this only shares its id/media-dir setup, not
+/// its video-copying logic.
+///
+/// `original_path`/`original_filename` are stored as plain empty strings
+/// -- both columns are `NOT NULL`, but nothing else in this schema
+/// requires them non-empty, and the frontend already has a real, existing
+/// "no video" fallback for a falsy `original_path` (`MainPanel.jsx`'s own
+/// empty state) -- `projectStatus.js` is what actually turns this into a
+/// real "Drafted" status rather than a broken-looking blank project.
+///
+/// `character_photo_path`, when given, is a *fresh* OS path from the
+/// picker -- copied into this project's own media folder the same "never
+/// trust the OS picker's own path past import" way `create_project`
+/// copies a video, and it's that app-managed copy's path that's stored,
+/// never the original. When omitted on an update (the user didn't pick a
+/// new one), the previously-stored `characterPhotoPath` is carried
+/// forward unchanged rather than being cleared.
+#[tauri::command]
+pub async fn create_strategy_draft(
+    app: AppHandle,
+    id: Option<String>,
+    title: String,
+    description: String,
+    params: serde_json::Value,
+    character_photo_path: Option<String>,
+) -> Result<Project, String> {
+    let conn = open_db(&app)?;
+
+    let (project_id, media_dir, created_at, previous_photo_path, is_new) = match &id {
+        Some(existing_id) => {
+            let existing = query_project_by_id(&conn, existing_id)?;
+            let previous_photo_path = existing
+                .state
+                .get("contentStrategyDraft")
+                .and_then(|d| d.get("characterPhotoPath"))
+                .and_then(|p| p.as_str())
+                .map(String::from);
+            (existing_id.clone(), project_media_dir(&app, existing_id)?, existing.created_at, previous_photo_path, false)
+        }
+        None => {
+            let new_id = generate_id();
+            let media_dir = project_media_dir(&app, &new_id)?;
+            (new_id, media_dir, now_unix_seconds(), None, true)
+        }
+    };
+
+    let stored_photo_path = match character_photo_path {
+        Some(src) => {
+            let ext = extension_of(&src);
+            let dest = media_dir.join(format!("character-reference.{ext}"));
+            tokio::fs::copy(&src, &dest).await.map_err(|e| format!("Couldn't save the character reference photo: {e}"))?;
+            Some(cli_path(&dest))
+        }
+        None => previous_photo_path,
+    };
+
+    let mut state = params;
+    if let serde_json::Value::Object(map) = &mut state {
+        map.insert("characterPhotoPath".to_string(), stored_photo_path.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null));
+    }
+
+    let project = Project {
+        id: project_id,
+        original_path: String::new(),
+        original_filename: String::new(),
+        title,
+        description,
+        hashtags: Vec::new(),
+        last_burned_path: None,
+        storage_location: default_storage_location(),
+        created_at,
+        updated_at: now_unix_seconds(),
+        exported_at: None,
+        published_at: None,
+        state: serde_json::json!({ "contentStrategyDraft": state }),
+    };
+
+    if is_new {
+        insert_project(&conn, &project)?;
+        Ok(project)
+    } else {
+        update_project_row(&conn, project)
+    }
+}
+
 /// Pure SQL, no `AppHandle` -- separated from `create_project` so it's
 /// directly testable against an in-memory connection (see the `tests`
 /// module below), not just exercisable through the full Tauri command
 /// pipeline.
 fn insert_project(conn: &Connection, project: &Project) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO projects (id, original_path, original_filename, title, description, hashtags, last_burned_path, storage_location, created_at, updated_at, state)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO projects (id, original_path, original_filename, title, description, hashtags, last_burned_path, storage_location, created_at, updated_at, exported_at, published_at, state)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             project.id,
             project.original_path,
@@ -337,10 +455,13 @@ fn insert_project(conn: &Connection, project: &Project) -> Result<(), String> {
             project.storage_location,
             project.created_at,
             project.updated_at,
+            project.exported_at,
+            project.published_at,
             serde_json::to_string(&project.state).unwrap_or_default(),
         ],
     )
     .map_err(|e| format!("Couldn't save the new project: {e}"))?;
+    sync_fts_index(conn, project)?;
     Ok(())
 }
 
@@ -402,8 +523,8 @@ fn update_project_row(conn: &Connection, project: Project) -> Result<Project, St
     let rows_changed = conn
         .execute(
             "UPDATE projects SET original_path = ?1, original_filename = ?2, title = ?3, description = ?4,
-             hashtags = ?5, last_burned_path = ?6, storage_location = ?7, updated_at = ?8, state = ?9
-             WHERE id = ?10",
+             hashtags = ?5, last_burned_path = ?6, storage_location = ?7, updated_at = ?8, exported_at = ?9, published_at = ?10, state = ?11
+             WHERE id = ?12",
             rusqlite::params![
                 project.original_path,
                 project.original_filename,
@@ -413,6 +534,8 @@ fn update_project_row(conn: &Connection, project: Project) -> Result<Project, St
                 project.last_burned_path,
                 project.storage_location,
                 updated_at,
+                project.exported_at,
+                project.published_at,
                 serde_json::to_string(&project.state).unwrap_or_default(),
                 project.id,
             ],
@@ -422,19 +545,16 @@ fn update_project_row(conn: &Connection, project: Project) -> Result<Project, St
     if rows_changed == 0 {
         return Err(format!("Project {} not found", project.id));
     }
-    Ok(Project { updated_at, ..project })
+    let saved = Project { updated_at, ..project };
+    sync_fts_index(conn, &saved)?;
+    Ok(saved)
 }
 
 #[tauri::command]
 pub async fn delete_project(app: AppHandle, id: String) -> Result<(), String> {
     let conn = open_db(&app)?;
     conn.execute("DELETE FROM projects WHERE id = ?1", [&id]).map_err(|e| format!("Couldn't delete project: {e}"))?;
-    // Best-effort -- a project with no embedding yet (never searched/saved
-    // since this feature shipped) has no matching rows here at all.
-    if let Ok(Some(vec_rowid)) = lookup_vec_rowid(&conn, &id) {
-        let _ = conn.execute("DELETE FROM project_vecs WHERE rowid = ?1", rusqlite::params![vec_rowid]);
-        let _ = conn.execute("DELETE FROM project_vec_ids WHERE project_id = ?1", rusqlite::params![id]);
-    }
+    let _ = conn.execute("DELETE FROM projects_fts WHERE project_id = ?1", rusqlite::params![id]);
     // Best-effort -- an already-missing folder (e.g. manually deleted by
     // the user) shouldn't block removing the database row.
     if let Ok(dir) = project_media_dir(&app, &id) {
@@ -443,107 +563,84 @@ pub async fn delete_project(app: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
-fn lookup_vec_rowid(conn: &Connection, project_id: &str) -> Result<Option<i64>, rusqlite::Error> {
-    conn.query_row(
-        "SELECT vec_rowid FROM project_vec_ids WHERE project_id = ?1",
-        rusqlite::params![project_id],
-        |r| r.get(0),
-    )
-    .map(Some)
-    .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e) })
-}
-
-/// Text a project's embedding is computed from: title + description +
-/// hashtags + a transcript snippet if one exists. Description already
-/// carries the topic in a couple of sentences (content_ideas.rs), so
-/// embedding the *whole* transcript would mostly dilute that with filler --
-/// the first ~120 words (roughly what a video's opening/hook covers) is
-/// plenty of extra signal for a video with no generated description yet
-/// (e.g. one that's only been transcribed, not run through content
-/// strategy) without needing the same token-budget machinery llm_budget.rs
-/// has to worry about (this only feeds a fixed-size embedding, not a
-/// prompt with a hard context ceiling).
-fn embeddable_text(project: &Project) -> String {
-    let words: Vec<&str> = project
+/// Text a project's FTS row is built from -- title + description +
+/// hashtags + a transcript excerpt if one exists. Mirrors the old
+/// embedding-based version's exact same scope, for the same reason:
+/// `description` already carries the topic in a couple of sentences
+/// (content_ideas.rs), so indexing the *whole* transcript would mostly add
+/// filler noise -- the first ~120 words (roughly a video's opening/hook)
+/// is plenty of extra searchable text for a project that's only been
+/// transcribed, not yet run through content strategy.
+fn transcript_excerpt(project: &Project) -> String {
+    project
         .state
         .get("words")
         .and_then(|w| w.as_array())
-        .map(|arr| arr.iter().filter_map(|w| w.get("word").and_then(|w| w.as_str())).take(120).collect())
-        .unwrap_or_default();
-    let transcript_snippet = words.join(" ");
-
-    [project.title.as_str(), project.description.as_str(), &project.hashtags.join(" "), &transcript_snippet]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(". ")
+        .map(|arr| arr.iter().filter_map(|w| w.get("word").and_then(|w| w.as_str())).take(120).collect::<Vec<_>>().join(" "))
+        .unwrap_or_default()
 }
 
-/// (Re-)computes and stores one project's embedding, called by the
-/// frontend at a few natural checkpoints (a fresh content-strategy result,
-/// a coarse debounce on manual title/description edits) rather than on
-/// every autosave tick -- embedding still has to go through the same
-/// Python process embeddings.rs manages, and while that process stays warm
-/// (unlike llm.rs's one-shot-per-call siblings), there's no reason to
-/// re-embed on every single keystroke either.
-#[tauri::command]
-pub async fn reembed_project(app: AppHandle, id: String) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    let project = query_project_by_id(&conn, &id)?;
-    let text = embeddable_text(&project);
-    if text.is_empty() {
-        return Ok(()); // Nothing to embed yet (e.g. a brand-new, untranscribed project).
-    }
-    let embedding = crate::embeddings::embed(&app, &text).await?;
-    upsert_project_embedding(&conn, &id, &embedding)
-}
-
-fn upsert_project_embedding(conn: &Connection, project_id: &str, embedding: &[f32]) -> Result<(), String> {
-    conn.execute("INSERT OR IGNORE INTO project_vec_ids (project_id) VALUES (?1)", rusqlite::params![project_id])
-        .map_err(|e| format!("Couldn't register project for search: {e}"))?;
-    let vec_rowid = lookup_vec_rowid(conn, project_id)
-        .map_err(|e| format!("Couldn't look up project's search id: {e}"))?
-        .ok_or_else(|| "Couldn't register project for search".to_string())?;
-
-    // vec0 has no ON CONFLICT/UPSERT support -- delete-then-insert is the
-    // documented safe pattern for "replace this row's embedding".
-    conn.execute("DELETE FROM project_vecs WHERE rowid = ?1", rusqlite::params![vec_rowid])
-        .map_err(|e| format!("Couldn't clear old embedding: {e}"))?;
+/// Rebuilds one project's FTS row -- delete-then-insert (FTS5 has no
+/// native upsert), called synchronously right after every insert/update so
+/// the index is never more than the same transaction behind `projects`
+/// itself. No separate debounced re-embed step, no Python round trip --
+/// unlike the embedding version this replaced, indexing here is just more
+/// SQL against the same already-open connection.
+fn sync_fts_index(conn: &Connection, project: &Project) -> Result<(), String> {
+    conn.execute("DELETE FROM projects_fts WHERE project_id = ?1", rusqlite::params![project.id])
+        .map_err(|e| format!("Couldn't clear old search index entry: {e}"))?;
     conn.execute(
-        "INSERT INTO project_vecs (rowid, embedding) VALUES (?1, ?2)",
-        rusqlite::params![vec_rowid, embedding.as_bytes()],
+        "INSERT INTO projects_fts (project_id, title, description, hashtags, transcript) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![project.id, project.title, project.description, project.hashtags.join(" "), transcript_excerpt(project)],
     )
-    .map_err(|e| format!("Couldn't store embedding: {e}"))?;
+    .map_err(|e| format!("Couldn't update search index: {e}"))?;
     Ok(())
 }
 
-/// Semantic search over the library: embeds `query`, runs a real
-/// cosine-distance KNN lookup (verified directly -- see Cargo.toml's
-/// comment on the `sqlite-vec` entry), and returns matching projects
-/// ranked nearest-first. Projects with no embedding yet (never saved/
-/// generated since this feature shipped, or `embeddable_text` came back
-/// empty) simply can't match -- there's nothing stale about that, just
-/// nothing indexed yet.
+/// Turns raw user input into a safe, useful FTS5 MATCH expression: each
+/// whitespace-split term becomes its own escaped, double-quoted, trailing-
+/// `*` phrase (`foo bar` -> `"foo"* "bar"*`), ANDed together (FTS5's
+/// default for multiple bare terms). Quoting neutralizes every character
+/// FTS5's own query syntax treats specially (`"`, `*`, `:`, `-`, a lone
+/// unmatched quote) -- verified directly, not assumed, against a real
+/// FTS5 table before shipping: "don't", "co-founder", and a bare `"`
+/// character all round-tripped without a syntax error, and a real prefix
+/// query ("gar" matching both "garlic" and "Garage") came back correctly
+/// ranked. An input that's empty after trimming, or entirely made of
+/// whitespace, produces an empty string here -- callers must check that
+/// themselves before running it as a query (an empty MATCH expression is
+/// a real SQL error, not "match everything").
+fn sanitize_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Full-text search over the library (title, description, hashtags, and a
+/// transcript excerpt), ranked by SQLite's own built-in `bm25()` relevance
+/// score. Replaced the original semantic/embedding-based version --
+/// requested directly, for two real, concrete wins: no Python embedding
+/// process to keep warm (an FTS5 MATCH query is answered by SQLite itself,
+/// synchronously, in the same process), and no ~19s model-load latency the
+/// first time a user searches in a fresh app session. A project with no
+/// indexed text yet (brand new, untranscribed, everything still blank)
+/// simply can't match anything -- there's nothing stale about that, just
+/// nothing indexed yet, exactly like the version this replaced.
 #[tauri::command]
-pub async fn search_projects(app: AppHandle, query: String) -> Result<Vec<Project>, String> {
-    let query = query.trim();
-    if query.is_empty() {
+pub fn search_projects(app: AppHandle, query: String) -> Result<Vec<Project>, String> {
+    let sanitized = sanitize_fts_query(query.trim());
+    if sanitized.is_empty() {
         return Ok(Vec::new());
     }
-    let embedding = crate::embeddings::embed(&app, query).await?;
     let conn = open_db(&app)?;
 
     let mut stmt = conn
-        .prepare(
-            "SELECT project_vec_ids.project_id, project_vecs.distance
-             FROM project_vecs
-             JOIN project_vec_ids ON project_vecs.rowid = project_vec_ids.vec_rowid
-             WHERE project_vecs.embedding MATCH ?1 AND k = 50
-             ORDER BY project_vecs.distance",
-        )
+        .prepare("SELECT project_id FROM projects_fts WHERE projects_fts MATCH ?1 ORDER BY bm25(projects_fts)")
         .map_err(|e| format!("Couldn't prepare search query: {e}"))?;
     let ranked_ids: Vec<String> = stmt
-        .query_map(rusqlite::params![embedding.as_bytes()], |r| r.get(0))
+        .query_map(rusqlite::params![sanitized], |r| r.get(0))
         .map_err(|e| format!("Couldn't run search query: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Couldn't read search results: {e}"))?;
@@ -553,6 +650,32 @@ pub async fn search_projects(app: AppHandle, query: String) -> Result<Vec<Projec
     // Sidebar.jsx) never justifies more, same reasoning that keeps
     // `list_projects` a plain `SELECT *` with no server-side paging.
     ranked_ids.iter().map(|id| query_project_by_id(&conn, id)).collect()
+}
+
+/// Stamps `exported_at` the moment `export_file` (below) successfully
+/// copies a project's burned output out to a user-picked destination --
+/// see `Project::exported_at`'s own doc comment for why this is tracked
+/// separately from `last_burned_path`. Called by the frontend right after
+/// a successful `export_file`, not folded into that command itself, since
+/// `export_file` takes bare paths (no project id) and is reused as-is.
+#[tauri::command]
+pub fn mark_project_exported(app: AppHandle, id: String) -> Result<Project, String> {
+    let conn = open_db(&app)?;
+    let mut project = query_project_by_id(&conn, &id)?;
+    project.exported_at = Some(now_unix_seconds());
+    update_project_row(&conn, project)
+}
+
+/// Same shape as `mark_project_exported` above, stamping `published_at`
+/// instead -- called by the frontend right after a successful
+/// `post_to_instagram_now` (instagram.rs), which itself has no notion of
+/// "which project" (it takes a bare video path).
+#[tauri::command]
+pub fn mark_project_published(app: AppHandle, id: String) -> Result<Project, String> {
+    let conn = open_db(&app)?;
+    let mut project = query_project_by_id(&conn, &id)?;
+    project.published_at = Some(now_unix_seconds());
+    update_project_row(&conn, project)
 }
 
 /// Computes (and creates the containing directory for) a fresh app-managed
@@ -692,6 +815,8 @@ mod tests {
             storage_location: default_storage_location(),
             created_at,
             updated_at: created_at,
+            exported_at: None,
+            published_at: None,
             state: serde_json::json!({"words": [{"word": "பாத்துக்கலாம்", "start": 0.0, "end": 0.5}]}),
         }
     }
@@ -758,5 +883,115 @@ mod tests {
         init_schema(&conn).unwrap();
         let result = query_project_by_id(&conn, "does-not-exist");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_fts_query_wraps_each_term_and_neutralizes_special_characters() {
+        assert_eq!(sanitize_fts_query("garage gym"), "\"garage\"* \"gym\"*");
+        // A literal double quote inside a term is escaped by doubling it
+        // (SQL string-literal convention), not stripped -- either way it
+        // must never break out of the quoted phrase.
+        assert_eq!(sanitize_fts_query("don't"), "\"don't\"*");
+        assert_eq!(sanitize_fts_query("co-founder"), "\"co-founder\"*");
+        assert_eq!(sanitize_fts_query("   "), "", "whitespace-only input must sanitize to empty, not a bare query");
+    }
+
+    #[test]
+    fn search_finds_a_project_by_a_word_that_only_appears_in_its_transcript() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let mut cooking = sample_project("cooking", 100);
+        cooking.title = "My Cooking Video".to_string();
+        cooking.state = serde_json::json!({"words": [{"word": "garlic", "start": 0.0, "end": 0.5}, {"word": "pasta", "start": 0.5, "end": 1.0}]});
+        insert_project(&conn, &cooking).unwrap();
+        let mut gym = sample_project("gym", 200);
+        gym.title = "Garage Gym Build".to_string();
+        insert_project(&conn, &gym).unwrap();
+
+        let hits: Vec<String> =
+            search_projects_in(&conn, "garlic").unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(hits, vec!["cooking".to_string()]);
+    }
+
+    #[test]
+    fn search_prefix_matches_across_multiple_fields_and_ranks_results() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let mut cooking = sample_project("cooking", 100);
+        cooking.title = "My Cooking Video".to_string();
+        insert_project(&conn, &cooking).unwrap();
+        let mut gym = sample_project("gym", 200);
+        gym.title = "Garage Gym Build".to_string();
+        insert_project(&conn, &gym).unwrap();
+
+        // "gar" is a real prefix of both "garlic" (only in cooking's own
+        // sample_project transcript) and "Garage" (gym's title).
+        let mut hits: Vec<String> = search_projects_in(&conn, "gar").unwrap().into_iter().map(|p| p.id).collect();
+        hits.sort();
+        assert_eq!(hits, vec!["cooking".to_string(), "gym".to_string()]);
+    }
+
+    #[test]
+    fn search_reflects_an_edit_immediately_no_separate_reindex_step() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        insert_project(&conn, &sample_project("aaa", 100)).unwrap();
+        assert!(search_projects_in(&conn, "renovation").unwrap().is_empty());
+
+        let mut edit = sample_project("aaa", 100);
+        edit.title = "Kitchen Renovation".to_string();
+        update_project_row(&conn, edit).unwrap();
+
+        let hits: Vec<String> = search_projects_in(&conn, "renovation").unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(hits, vec!["aaa".to_string()]);
+    }
+
+    #[test]
+    fn deleting_a_project_removes_it_from_search_too() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let mut project = sample_project("aaa", 100);
+        project.title = "Unique Searchable Title".to_string();
+        insert_project(&conn, &project).unwrap();
+        assert_eq!(search_projects_in(&conn, "unique").unwrap().len(), 1);
+
+        conn.execute("DELETE FROM projects WHERE id = ?1", ["aaa"]).unwrap();
+        conn.execute("DELETE FROM projects_fts WHERE project_id = ?1", ["aaa"]).unwrap();
+
+        assert!(search_projects_in(&conn, "unique").unwrap().is_empty());
+    }
+
+    /// `search_projects` itself takes an `AppHandle` (to open its own
+    /// connection) -- this mirrors its actual query logic against an
+    /// in-memory connection the same way `query_project_by_id`/
+    /// `insert_project` already are tested, rather than duplicating the
+    /// sanitize+prepare+query+lookup steps inline in every test above.
+    fn search_projects_in(conn: &Connection, query: &str) -> Result<Vec<Project>, String> {
+        let sanitized = sanitize_fts_query(query.trim());
+        if sanitized.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn
+            .prepare("SELECT project_id FROM projects_fts WHERE projects_fts MATCH ?1 ORDER BY bm25(projects_fts)")
+            .map_err(|e| e.to_string())?;
+        let ranked_ids: Vec<String> =
+            stmt.query_map(rusqlite::params![sanitized], |r| r.get(0)).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        ranked_ids.iter().map(|id| query_project_by_id(conn, id)).collect()
+    }
+
+    #[test]
+    fn mark_exported_stamps_exported_at_without_touching_created_at() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        insert_project(&conn, &sample_project("aaa", 100)).unwrap();
+        assert_eq!(query_project_by_id(&conn, "aaa").unwrap().exported_at, None);
+
+        let mut project = query_project_by_id(&conn, "aaa").unwrap();
+        project.exported_at = Some(now_unix_seconds());
+        update_project_row(&conn, project).unwrap();
+
+        let fetched = query_project_by_id(&conn, "aaa").unwrap();
+        assert!(fetched.exported_at.is_some());
+        assert_eq!(fetched.created_at, 100, "marking exported must never move a project in the newest-first list");
     }
 }

@@ -951,3 +951,33 @@ export const CAPTION_THEMES = [
 export function defaultTheme() {
   return CAPTION_THEMES[0];
 }
+
+// Rotated through by speaker_id (mod length) when auto-applying a style
+// at a "Speaker change" suggestion -- deliberately chosen to roughly
+// track captions.rs's own SPEAKER_COLORS palette (#FFE600 yellow,
+// #00E5FF cyan, #FF4D8D pink, #7CFF6B green, used for cascade mode's
+// per-speaker accent color and this app's diarization timeline bands),
+// so an auto-styled speaker transition stays in the same visual family
+// as how that speaker is already color-coded elsewhere, not an
+// unrelated arbitrary pick.
+const SPEAKER_ROTATION_THEME_IDS = ["cascade-bold", "neon-pop", "pulse-highlight", "lime-punch"];
+
+// Picks a theme id to auto-apply for a suggestTransitionPoints result
+// (captions.js), used by Timeline.jsx's "Auto-apply" action so accepting
+// a suggestion doesn't require opening the full style editor. Priority
+// order below is deliberate: a strong emotional/energetic signal wins
+// over a same-moment pause, since the pause is often just what created
+// room for the more interesting event to register as its own signal in
+// the first place, not the main event itself. Every branch maps to a
+// theme whose own name/description in themes.js already matches the
+// vibe (see that file's descriptions) -- not an arbitrary pick.
+export function autoThemeIdForSuggestion(reasons, speakerId) {
+  if (reasons.includes("Emphasis")) return "beast-mode"; // "a high-contrast, aggressive cascade style"
+  if (reasons.includes("Speaker change") && speakerId != null) {
+    return SPEAKER_ROTATION_THEME_IDS[speakerId % SPEAKER_ROTATION_THEME_IDS.length];
+  }
+  if (reasons.includes("Speeds up")) return "hustle-energy"; // "fast, energetic pacing"
+  if (reasons.includes("Slows down")) return "documentary-serif"; // "quiet, credible tone"
+  if (reasons.includes("Long pause") || reasons.includes("Pause")) return "minimalist-line"; // "quiet captions"
+  return defaultTheme().id;
+}

@@ -31,7 +31,6 @@ mod ducking;
 mod ffmpeg;
 mod instagram;
 mod jumpcuts;
-mod embeddings;
 mod library;
 mod llm;
 mod llm_budget;
@@ -50,8 +49,10 @@ mod slang;
 mod stt;
 mod streaming_stt;
 mod tray;
+mod transition_planner;
 mod tts;
 mod util;
+mod video_transitions;
 mod voice_clone;
 mod vosync;
 
@@ -161,6 +162,7 @@ pub fn run() {
             captions::burn_captions,
             captions::analyze_prosody,
             content_ideas::suggest_content_strategy,
+            transition_planner::suggest_transition_plan,
             diarize::diarize_speakers,
             ducking::duck_music,
             instagram::save_instagram_app_config,
@@ -172,15 +174,17 @@ pub fn run() {
             instagram::post_to_instagram_now,
             jumpcuts::remove_silence_and_fillers,
             library::create_project,
+            library::create_strategy_draft,
             library::list_projects,
             library::get_project,
-            library::reembed_project,
             library::search_projects,
             library::save_project,
             library::delete_project,
             library::processed_output_path,
             library::reveal_in_folder,
             library::export_file,
+            library::mark_project_exported,
+            library::mark_project_published,
             library::get_default_caption_style,
             library::save_default_caption_style,
             library::reset_default_caption_style,

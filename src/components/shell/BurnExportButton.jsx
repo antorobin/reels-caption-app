@@ -13,7 +13,17 @@ import ProgressBar from "../ProgressBar.jsx";
 // underlying prop/function names (`burnCaptions`, `burning`, ...) stay as
 // they are -- they describe the actual mechanism (burning captions into a
 // new video file), not what the button is called.
-function BurnExportButton({ burnCaptions, burning, burnProgress, burnStatus, disabled, lastBurnedPath, contentIdeas, revealLastBurned }) {
+function BurnExportButton({
+  burnCaptions,
+  burning,
+  burnProgress,
+  burnStatus,
+  disabled,
+  lastBurnedPath,
+  contentIdeas,
+  revealLastBurned,
+  currentProjectId,
+}) {
   return (
     <div className="burn-export-dock">
       {burnStatus && (
@@ -32,7 +42,7 @@ function BurnExportButton({ burnCaptions, burning, burnProgress, burnStatus, dis
         </div>
       )}
       <div className="burn-export-buttons-row">
-        <ExportButton lastBurnedPath={lastBurnedPath} contentIdeas={contentIdeas} />
+        <ExportButton lastBurnedPath={lastBurnedPath} contentIdeas={contentIdeas} currentProjectId={currentProjectId} />
         <button type="button" className="burn-export-button" onClick={burnCaptions} disabled={disabled || burning}>
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />

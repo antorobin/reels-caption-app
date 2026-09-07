@@ -29,6 +29,48 @@ pub async fn probe_duration_seconds(path: &str) -> Option<f64> {
     String::from_utf8_lossy(&output.stdout).trim().parse::<f64>().ok()
 }
 
+/// Best-effort width/height/fps lookup, needed only when video
+/// transitions are requested (see video_transitions.rs) -- their filter
+/// graph needs the real frame size to crop a zoom back down exactly and
+/// to size the flash overlay's solid-color source, unlike ASS captions
+/// (which scale via PlayResX/Y regardless of actual resolution). Returns
+/// `None` on any probe failure or an unparseable/zero frame rate --
+/// callers treat that the same as "no transitions requested" rather than
+/// failing the whole burn over a bonus visual effect.
+pub async fn probe_video_dimensions(path: &str) -> Option<(u32, u32, f64)> {
+    let output = Command::new(crate::bin_paths::ffprobe_path())
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,r_frame_rate",
+            "-of",
+            "csv=p=0",
+            path,
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut parts = text.trim().split(',');
+    let width: u32 = parts.next()?.parse().ok()?;
+    let height: u32 = parts.next()?.parse().ok()?;
+    let mut fps_parts = parts.next()?.split('/'); // e.g. "30/1" or "30000/1001"
+    let num: f64 = fps_parts.next()?.parse().ok()?;
+    let den: f64 = fps_parts.next().unwrap_or("1").parse().ok()?;
+    if den == 0.0 {
+        return None;
+    }
+    Some((width, height, num / den))
+}
+
 /// Whether `path` has at least one audio stream -- checked before
 /// extracting audio for transcription, since a silent video (real content
 /// here: B-roll meant to get a generated voice-over, not a recording

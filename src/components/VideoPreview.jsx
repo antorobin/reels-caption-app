@@ -3,11 +3,25 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { buildChunkTimeline, buildStyleTimeline, findActiveChunkEntry } from "../lib/captions.js";
 import { formatTime } from "../lib/time.js";
 
-// Caption font sizes are authored in ASS's PlayResX=1920 coordinate space
-// (see captions.rs). Scale them down to whatever width the video is
-// actually rendered at in the DOM so the preview roughly matches the
-// eventual burned-in size.
-const ASS_PLAY_RES_WIDTH = 1920;
+// Caption font sizes are authored in ASS's PlayResX=1920/PlayResY=1080
+// coordinate space (see captions.rs). Scaling by *height* here, not
+// width, is deliberate and verified against real libass output, not
+// assumed: reels are vertical (9:16), so PlayRes's 16:9 landscape shape
+// essentially never matches the actual video's real aspect ratio.
+// Burned two real test videos through libass with an identical style/
+// font_size -- one portrait 1080x1920, one ultra-wide 3840x1080 -- and
+// measured the actual rendered glyph height in the output frames: both
+// matched `video_height / PlayResY` (1080), NOT `video_width / PlayResX`
+// (1920), regardless of which axis was "wider" than PlayRes. A
+// width-based scale was off by ~3x for the portrait case -- the
+// dominant real shape for this app -- which is why captions in the live
+// preview could look and wrap completely differently from what actually
+// burns. The video element's own *native* resolution cancels out of the
+// math entirely (scale = onscreen pixel height ÷ 1080, independent of
+// the source video's real pixel dimensions), so this only ever needs
+// the video's rendered on-screen height, exactly like the old width-
+// based version only needed its rendered on-screen width.
+const ASS_PLAY_RES_HEIGHT = 1080;
 
 // Mirrors CASCADE_PREV_SCALE / CASCADE_ACTIVE_SCALE in captions.rs.
 const CASCADE_PREV_SCALE = 0.6;
@@ -229,6 +243,7 @@ function VideoPreview({
   words,
   captionStyle,
   captionStyleOverrides = [],
+  videoTransitions = [],
   onTimeUpdate,
   onLoadedMetadata,
   onSeek,
@@ -237,12 +252,25 @@ function VideoPreview({
   musicPath,
   duckLevel,
 }) {
-  const [displayWidth, setDisplayWidth] = useState(0);
+  const [displayHeight, setDisplayHeight] = useState(0);
   const src = convertFileSrc(videoPath);
   const voiceoverAudioRef = useRef(null);
   const musicAudioRef = useRef(null);
   const videoFrameRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Two alternating "variant" classes per effect (-a/-b, identical
+  // keyframes under different names) rather than one class toggled
+  // on/off: an ever-incrementing counter picking between them means each
+  // new trigger always changes the resolved `animation-name`, which is
+  // what actually restarts a CSS animation -- re-applying the *same*
+  // class when one is already mid-play would not restart it. Starts at
+  // -1 ("never triggered yet, no class at all") so no stray flash/zoom
+  // shows before the first real one.
+  const [zoomVariant, setZoomVariant] = useState(-1);
+  const [flashVariant, setFlashVariant] = useState(-1);
+  const [shakeVariant, setShakeVariant] = useState(-1);
+  const [pulseVariant, setPulseVariant] = useState(-1);
+  const lastCheckedTimeRef = useRef(0);
 
   // Recomputed only when the transcript actually changes, not on every
   // timeupdate tick -- `duckVolumeAt` below is called far more often than
@@ -259,13 +287,31 @@ function VideoPreview({
   // edit that was actually right there in the (non-fullscreen) preview the
   // whole time, and it turned out they'd gone fullscreen via the video's
   // own button to read small captions more easily and found none at all.
+  // Entering/exiting fullscreen changes the video's actual rendered pixel
+  // height dramatically (a small ~240px-tall preview column vs. the full
+  // display) -- but fullscreening *an element* via the Fullscreen API
+  // (rather than the whole browser window) doesn't reliably fire a
+  // `window resize` event in every environment, so the `measure` effect
+  // below (which only listens for that) never re-ran here on its own.
+  // Confirmed the hard way: captions rendered at the small preview's tiny
+  // font size, barely needing to wrap, blown up onto a full screen where
+  // the real burn (and the non-fullscreen preview) both wrap normally --
+  // exactly the class of bug ASS_PLAY_RES_HEIGHT's own scale fix was
+  // meant to close, just re-triggered by a resize path nothing was
+  // listening on. The short delay lets the fullscreen transition's layout
+  // actually settle before reading clientHeight -- reading it in the same
+  // tick `fullscreenchange` fires can still reflect the pre-transition
+  // size in some browsers.
   useEffect(() => {
     function handleFullscreenChange() {
       setIsFullscreen(document.fullscreenElement === videoFrameRef.current);
+      setTimeout(() => {
+        if (videoRef.current) setDisplayHeight(videoRef.current.clientHeight);
+      }, 100);
     }
     document.addEventListener("fullscreenchange", handleFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
-  }, []);
+  }, [videoRef]);
 
   function toggleFullscreen() {
     if (document.fullscreenElement) {
@@ -275,9 +321,40 @@ function VideoPreview({
     }
   }
 
+  // A different video/project's transitions shouldn't replay whatever was
+  // mid-flight for the previous one, and shouldn't retroactively fire for
+  // everything between 0 and wherever playback happens to already be.
+  useEffect(() => {
+    lastCheckedTimeRef.current = 0;
+  }, [videoPath]);
+
+  // Fires the matching CSS animation the moment playback crosses forward
+  // over a transition's own `time` -- `> last && <= currentTime` (not
+  // just "close to currentTime") so a normal timeupdate cadence (several
+  // times a second, not every frame) still catches it exactly once,
+  // without needing every tick to land precisely on the transition's
+  // timestamp. Landing on it from a *seek* past it (scrubbing, jumping
+  // via a word click) is deliberately still just a forward crossing by
+  // this same rule -- the effect fires once for that jump rather than
+  // requiring the user to play back through it normally; scrubbing
+  // *backward* past one, or loading a project with playback already
+  // beyond it, correctly doesn't fire anything.
+  useEffect(() => {
+    const last = lastCheckedTimeRef.current;
+    for (const t of videoTransitions) {
+      if (t.time > last && t.time <= currentTime) {
+        if (t.effect === "zoom-punch") setZoomVariant((v) => v + 1);
+        else if (t.effect === "flash-cut") setFlashVariant((v) => v + 1);
+        else if (t.effect === "shake") setShakeVariant((v) => v + 1);
+        else if (t.effect === "color-pulse") setPulseVariant((v) => v + 1);
+      }
+    }
+    lastCheckedTimeRef.current = currentTime;
+  }, [currentTime, videoTransitions]);
+
   useEffect(() => {
     function measure() {
-      if (videoRef.current) setDisplayWidth(videoRef.current.clientWidth);
+      if (videoRef.current) setDisplayHeight(videoRef.current.clientHeight);
     }
     measure();
     window.addEventListener("resize", measure);
@@ -409,7 +486,7 @@ function VideoPreview({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only care about a duck-level change here, not every render
   }, [duckLevel]);
 
-  const scale = displayWidth > 0 ? displayWidth / ASS_PLAY_RES_WIDTH : 0;
+  const scale = displayHeight > 0 ? displayHeight / ASS_PLAY_RES_HEIGHT : 0;
 
   // Range-aware: resolves which style (base or an override) applies at
   // `currentTime`, and chunks each style's own portion of the transcript
@@ -454,6 +531,28 @@ function VideoPreview({
 
   const activeCascade = isCascade && activeEntry ? { current: activeEntry.chunk, prev: activeEntry.prev } : null;
 
+  // Alternating -a/-b variant per effect (see zoomVariant/flashVariant's
+  // own doc comment above) -- `-1` (never triggered) renders no class at
+  // all, so nothing plays before the first real crossing.
+  function alternatingAnimClass(baseName, variant) {
+    if (variant < 0) return "";
+    return `${baseName}-${variant % 2 === 0 ? "a" : "b"}`;
+  }
+  const zoomAnimClass = alternatingAnimClass("video-zoom-punch-anim", zoomVariant);
+  const flashAnimClass = alternatingAnimClass("video-flash-cut-anim", flashVariant);
+  const shakeAnimClass = alternatingAnimClass("video-shake-anim", shakeVariant);
+  const pulseAnimClass = alternatingAnimClass("video-color-pulse-anim", pulseVariant);
+  // A real, accepted limitation of the preview *approximation*
+  // specifically (documented in README): each effect's CSS class sets
+  // the `animation` shorthand, which is a single slot per element -- if
+  // any two of these four classes are ever simultaneously active (two
+  // transitions triggered at the exact same instant), only one of their
+  // `animation` declarations actually wins, regardless of which pair or
+  // whether they animate the same underlying property (`transform` vs.
+  // `filter`) or not. The real burned export never has this problem --
+  // it's a genuine chained ffmpeg filter graph, not competing CSS
+  // animations on one DOM element.
+
   return (
     <div className="video-preview">
       <div className="video-frame" ref={videoFrameRef}>
@@ -462,6 +561,18 @@ function VideoPreview({
           src={src}
           controls
           muted={!!voiceoverPath}
+          // A live-preview *approximation* of video_transitions.rs's zoom
+          // punch, shake, and color pulse -- animates the video element's
+          // own `transform`/`filter` directly rather than the real ffmpeg
+          // filter graph. `.video-frame`'s own `overflow: hidden`
+          // (styles.css) clips the enlarged/wobbling video back down to
+          // the frame's bounds, the same "stay inside the original box"
+          // shape the real crop produces -- the caption overlay below is
+          // a sibling, not a child, of this element, so it's never itself
+          // affected. See alternatingAnimClass's own doc comment above
+          // for this approach's one real limitation (two of these classes
+          // simultaneously active on this same element).
+          className={`video-preview-player ${zoomAnimClass} ${shakeAnimClass} ${pulseAnimClass}`}
           onVolumeChange={handleVolumeChange}
           onTimeUpdate={(e) => {
             const t = e.currentTarget.currentTime;
@@ -483,9 +594,8 @@ function VideoPreview({
           }}
           onLoadedMetadata={(e) => {
             onLoadedMetadata(e.currentTarget.duration);
-            setDisplayWidth(e.currentTarget.clientWidth);
+            setDisplayHeight(e.currentTarget.clientHeight);
           }}
-          className="video-preview-player"
         />
         {voiceoverPath && <audio ref={voiceoverAudioRef} src={convertFileSrc(voiceoverPath)} style={{ display: "none" }} />}
         {/* Deliberately no `loop` here -- a picked file shorter than the video just goes
@@ -495,6 +605,13 @@ function VideoPreview({
             A generated bed never hits this anyway -- music_gen.rs already loops it to the
             video's full length before handing back a path. */}
         {musicPath && <audio ref={musicAudioRef} src={convertFileSrc(musicPath)} style={{ display: "none" }} />}
+        {/* The flash-cut approximation -- a plain white div faded in/out via
+            CSS, positioned as a sibling *before* the caption overlay layer
+            below so it paints underneath the captions, matching the real
+            burn's order (transitions applied to the footage, captions
+            drawn on top of that) -- captions stay fully readable through
+            the flash in both the preview and the real export. */}
+        {flashAnimClass && <div className={`video-flash-cut-overlay ${flashAnimClass}`} />}
         {scale > 0 && (
           <div className="video-overlay-layer">
             {activeCaption && (

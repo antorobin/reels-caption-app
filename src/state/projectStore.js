@@ -79,6 +79,12 @@ export function emptyProjectSlice(id, captionStyleDefault) {
     // same convention as the top-level `captionThemeId` above); the burn
     // pipeline only ever reads `start`/`end`/`style`.
     captionStyleOverrides: [],
+    // Real burned-into-the-footage visual effects at a point in time --
+    // [{time, effect}], effect one of "zoom-punch" | "flash-cut". See
+    // video_transitions.rs. Independent of captionStyleOverrides above:
+    // a transition changes the footage itself, not how captions are
+    // drawn, so the two can be placed at the same pin or entirely apart.
+    videoTransitions: [],
     prosody: [],
     speakers: [],
     voiceoverPath: "",
@@ -101,6 +107,7 @@ export function emptyProjectSlice(id, captionStyleDefault) {
       diarize: { running: false, status: "", progress: null },
       burn: { running: false, status: "", progress: null },
       contentIdeas: { running: false, error: "" },
+      transitionPlan: { running: false, error: "" },
     },
   };
 }
@@ -151,7 +158,6 @@ export function upsertProjectSlice(id, patch) {
   state = { ...state, projects: { ...state.projects, [id]: next } };
   emitChange();
   maybeScheduleAutosave(id);
-  if (touchesReembedFields(partial)) maybeScheduleReembed(id);
 }
 
 /// Merges a patch into one project's `jobs` sub-object specifically --
@@ -182,7 +188,7 @@ export function removeProjectSlice(id) {
 
 /// Registered once by App.jsx (it owns `invoke` and knows the exact shape
 /// `save_project` expects) so every `upsertProjectSlice`/`setProjectSlice`
-/// call below can trigger autosave/reembed *automatically* -- callers never
+/// call below can trigger autosave *automatically* -- callers never
 /// have to remember to schedule a save themselves, which would be an easy
 /// thing to silently forget at any one of the many call sites this store
 /// is written from (background jobs, synchronous UI edits, project
@@ -231,45 +237,14 @@ export function flushProjectSave(id) {
   return autosaveConfig.invokeFn("save_project", { project: autosaveConfig.buildPayload(slice) }).catch(() => {});
 }
 
-const reembedTimers = new Map();
-const REEMBED_DEBOUNCE_MS = 8000;
-// Matches the original App.jsx effect's own dependency list exactly --
-// only these fields (what `library.rs`'s `embeddable_text` actually
-// reads title/description/hashtags from directly) trigger a re-embed. A
-// transcript-only edit still gets picked up indirectly, the same way it
-// always did: a fresh transcript flows into generated content ideas,
-// which flows into title/description via the seeding effect, which
-// itself touches one of these fields.
-const REEMBED_TRIGGER_FIELDS = ["title", "description", "hashtags"];
-
-function touchesReembedFields(partial) {
-  return partial && typeof partial === "object" && REEMBED_TRIGGER_FIELDS.some((field) => field in partial);
-}
-
-function maybeScheduleReembed(id) {
-  if (!autosaveConfig || !id) return;
-  const existing = reembedTimers.get(id);
-  if (existing) clearTimeout(existing);
-  const timer = setTimeout(() => {
-    reembedTimers.delete(id);
-    autosaveConfig.invokeFn("reembed_project", { id }).catch(() => {});
-  }, REEMBED_DEBOUNCE_MS);
-  reembedTimers.set(id, timer);
-}
-
-/// Cancels any pending autosave/reembed for `id` -- called when a project
-/// is deleted, so a stale timer doesn't try to save/reembed a project that
+/// Cancels any pending autosave for `id` -- called when a project
+/// is deleted, so a stale timer doesn't try to save a project that
 /// no longer exists a second later.
 export function cancelProjectTimers(id) {
   const saveTimer = saveTimers.get(id);
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimers.delete(id);
-  }
-  const reembedTimer = reembedTimers.get(id);
-  if (reembedTimer) {
-    clearTimeout(reembedTimer);
-    reembedTimers.delete(id);
   }
 }
 

@@ -1,3 +1,4 @@
+import { displayNameFor } from "../CaptionStyleEditor.jsx";
 import TranscriptEditor from "../TranscriptEditor.jsx";
 
 // Always shows the transcript (auto-populated once the pipeline finishes)
@@ -35,6 +36,9 @@ function TranscriptPanel({
   pipelineRunning,
   pipelineStatus,
   onTranscribe,
+  captionStyle,
+  captionThemeId,
+  onOpenStylePicker,
 }) {
   return (
     <aside className="shell-inspector-col">
@@ -69,6 +73,27 @@ function TranscriptPanel({
             </>
           )}
         </div>
+
+        {currentProjectId && captionStyle && (
+          // Always visible, regardless of which project is open or which
+          // tab MoreOptionsModal was last left on -- picking a theme (or
+          // hand-tweaking one) for THIS project's own style is otherwise
+          // only visible by opening the style editor and comparing field
+          // values, which doesn't survive switching projects and coming
+          // back in any obviously-visible way. `displayNameFor` is the
+          // same "<theme> (Custom)" computation CaptionStyleEditor.jsx's
+          // own indicator uses -- one source of truth, just surfaced in a
+          // second, always-visible place.
+          <div className="inspector-panel current-theme-panel">
+            <div className="inspector-panel-header">
+              <h2>Caption theme</h2>
+            </div>
+            <p className="current-theme-panel-name">{displayNameFor(captionThemeId, captionStyle)}</p>
+            <button type="button" className="link-button" onClick={onOpenStylePicker}>
+              Change theme
+            </button>
+          </div>
+        )}
       </div>
     </aside>
   );

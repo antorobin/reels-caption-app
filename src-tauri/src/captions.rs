@@ -22,8 +22,9 @@ use crate::util::{cli_path, unique_temp_path, verify_transcript_is_fresh};
 const SPEAKER_COLORS: &[&str] = &["#FFE600", "#00E5FF", "#FF4D8D", "#7CFF6B"];
 
 /// Which speaker (if any) is talking at `time`, based on the segment
-/// that contains it.
-fn speaker_id_at(speakers: &[SpeakerSegment], time: f64) -> Option<u8> {
+/// that contains it. `pub(crate)` so transition_planner.rs can reuse it
+/// for the same lookup instead of a second copy.
+pub(crate) fn speaker_id_at(speakers: &[SpeakerSegment], time: f64) -> Option<u8> {
     speakers.iter().find(|s| time >= s.start && time < s.end).map(|s| s.speaker_id)
 }
 
@@ -1070,6 +1071,7 @@ pub async fn burn_captions(
     prosody: Vec<ProsodyWord>,
     speakers: Vec<SpeakerSegment>,
     overrides: Vec<CaptionStyleOverride>,
+    video_transitions: Vec<crate::video_transitions::VideoTransition>,
     voiceover_path: Option<String>,
     voiceover_offset_seconds: Option<f64>,
     project_id: String,
@@ -1106,8 +1108,12 @@ pub async fn burn_captions(
     // misbehaves. A voiceover forces the single-pass path regardless of
     // length — segments.rs slices the *original* audio per segment, with
     // no notion of a separate voiceover file/offset to slice in lockstep;
-    // correctness matters more here than the parallel-encode speedup.
-    if segment_count > 1 && voiceover_path.is_none() {
+    // correctness matters more here than the parallel-encode speedup. Any
+    // video transitions do too, for the same reason: segments.rs has no
+    // shift/clip treatment for a transition's absolute timestamp across a
+    // segment boundary the way CaptionStyleOverride's shift_overrides
+    // does — see video_transitions.rs's own doc comment.
+    if segment_count > 1 && voiceover_path.is_none() && video_transitions.is_empty() {
         if let Some(duration) = duration {
             let result = burn_captions_segmented(
                 &app,
@@ -1131,12 +1137,38 @@ pub async fn burn_captions(
     let ass_contents = build_ass_document(&words, &style, &prosody, &speakers, &overrides)?;
     std::fs::write(&ass_path, ass_contents).map_err(|e| format!("Failed to write subtitle file: {e}"))?;
 
-    let filter = format!(
+    let ass_filter = format!(
         "ass='{}':fontsdir='{}'",
         escape_ffmpeg_filter_path(&ass_path),
         escape_ffmpeg_filter_path(crate::bin_paths::fonts_dir())
     );
     let encoder = best_encoder().await;
+
+    // Probed here (before `video_path` is moved into `args` below), only
+    // when transitions were actually requested — the caption burn itself
+    // has never needed real pixel dimensions (ASS scales via a fixed
+    // PlayResX/Y), so a probe failure here degrades to "no transitions"
+    // rather than failing the whole burn over a bonus visual effect. See
+    // video_transitions.rs's own doc comment for why a generous/wrong
+    // `duration` fallback here is safe rather than risking a truncated
+    // output.
+    let transition_filter = if video_transitions.is_empty() {
+        None
+    } else {
+        match crate::ffmpeg::probe_video_dimensions(&video_path).await {
+            Some((width, height, fps)) => crate::video_transitions::build_transition_filter(
+                &video_transitions,
+                "0:v",
+                "vt_out",
+                width,
+                height,
+                fps,
+                duration.unwrap_or(9999.0),
+            ),
+            None => None,
+        }
+    };
+    let used_transition_filter = transition_filter.is_some();
 
     let mut args = vec!["-y".to_string(), "-i".to_string(), video_path];
     // A voiceover replaces the video's own audio track entirely — same
@@ -1150,8 +1182,20 @@ pub async fn burn_captions(
         args.push("-i".to_string());
         args.push(vo_path);
     }
-    args.push("-vf".to_string());
-    args.push(filter);
+    if let Some(transition_graph) = transition_filter {
+        // Transitions render first, so the ASS overlay (the captions)
+        // stays fixed on screen rather than zooming/flashing along with
+        // the footage — chained into one filter_complex graph rather than
+        // two separate ffmpeg passes, which would re-encode twice, the
+        // second pass compounding the first's compression artifacts.
+        args.push("-filter_complex".to_string());
+        args.push(format!("{transition_graph};[vt_out]{ass_filter}[final]"));
+        args.push("-map".to_string());
+        args.push("[final]".to_string());
+    } else {
+        args.push("-vf".to_string());
+        args.push(ass_filter);
+    }
     // Burning text onto a video needs decode + re-encode no matter what
     // (filters can't stream-copy). Prefer a hardware encoder when this
     // machine's ffmpeg build has one (usually 5-10x faster than even the
@@ -1160,15 +1204,25 @@ pub async fn burn_captions(
     args.extend(encoder.speed_args(0)); // 0 threads = let libx264 auto-detect; no oversubscription risk for a single job
     args.push("-c:v".to_string());
     args.push(encoder.codec_name().to_string());
+    // `-filter_complex` disables ffmpeg's automatic per-type stream
+    // selection entirely (unlike plain `-vf`), so once it's used every
+    // stream this output needs — audio included — must be mapped
+    // explicitly, not just the video the filtergraph itself produced.
     if has_voiceover {
-        args.push("-map".to_string());
-        args.push("0:v".to_string());
+        if !used_transition_filter {
+            args.push("-map".to_string());
+            args.push("0:v".to_string());
+        }
         args.push("-map".to_string());
         args.push("1:a".to_string());
         args.push("-c:a".to_string());
         args.push("aac".to_string());
         args.push("-shortest".to_string());
     } else {
+        if used_transition_filter {
+            args.push("-map".to_string());
+            args.push("0:a".to_string());
+        }
         args.push("-c:a".to_string());
         args.push("copy".to_string());
     }
