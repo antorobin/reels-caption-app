@@ -76,10 +76,17 @@ pub fn python_exe(prefix: &Path) -> PathBuf {
     }
 }
 
-fn bundled_env_prefix(env_name: &str) -> Option<PathBuf> {
-    let base = BUNDLED_PYTHON_BASE.get()?.as_ref()?;
+/// `<base>/<env_name>/` iff it holds a real interpreter -- the pure part
+/// of bundled-env resolution, split out so it's testable without the
+/// `BUNDLED_PYTHON_BASE` startup cache.
+fn env_prefix_in(base: &Path, env_name: &str) -> Option<PathBuf> {
     let prefix = base.join(env_name);
     python_exe(&prefix).exists().then_some(prefix)
+}
+
+fn bundled_env_prefix(env_name: &str) -> Option<PathBuf> {
+    let base = BUNDLED_PYTHON_BASE.get()?.as_ref()?;
+    env_prefix_in(base, env_name)
 }
 
 /// Resolves the env *prefix* (its `sys.prefix` root, where `python.exe`
@@ -108,4 +115,45 @@ pub async fn resolve_env_prefix(
 
     let conda = crate::conda_util::resolve_conda_env(env_name, probe_args, env_var_override).await?;
     crate::conda_util::resolve_conda_env_prefix(&conda, env_name).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn touch(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn env_prefix_in_finds_a_populated_env_and_ignores_an_empty_one() {
+        let base = std::env::temp_dir().join(format!("kr-pyenv-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+
+        // A populated env: its interpreter is where python_exe() expects.
+        let stt = base.join("stt");
+        touch(&python_exe(&stt));
+        assert_eq!(env_prefix_in(&base, "stt").as_deref(), Some(stt.as_path()));
+
+        // A directory with no interpreter is not a usable env.
+        fs::create_dir_all(base.join("tts")).unwrap();
+        assert_eq!(env_prefix_in(&base, "tts"), None);
+
+        // A name with nothing on disk at all.
+        assert_eq!(env_prefix_in(&base, "media-ai"), None);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn python_exe_layout_is_platform_correct() {
+        let p = Path::new("/x/env");
+        if cfg!(windows) {
+            assert!(python_exe(p).ends_with("python.exe"));
+        } else {
+            assert!(python_exe(p).ends_with("bin/python3"));
+        }
+    }
 }

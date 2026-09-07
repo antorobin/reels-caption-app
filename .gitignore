@@ -35,6 +35,12 @@ src-tauri/resources/tts-models/en/*.onnx.json
 # voice cloning setup section).
 src-tauri/resources/voice-clone-models/
 
+# Bundled relocatable Python environments — built locally by
+# `node scripts/build-python-runtime.mjs` from python-build-standalone +
+# the pinned requirements/*.txt (see docs/RUNTIME-PACKS.md). Hundreds of MB
+# per env; rebuilt, never vendored.
+src-tauri/resources/python/
+
 # All of the above (ffmpeg/ffprobe, llama.cpp+Qwen, Piper voices, the Tamil
 # checkpoint, the OpenVoice checkpoint) are large, static binaries that
 # never change once fetched — a poor fit for Git LFS, which bills by
