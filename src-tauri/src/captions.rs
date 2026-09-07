@@ -1047,7 +1047,10 @@ mod tests {
         let style_lines: Vec<&str> = doc.lines().filter(|l| l.starts_with("Style:")).collect();
         assert_eq!(style_lines.len(), 2);
         assert!(style_lines.iter().any(|l| l.starts_with("Style: Default,")));
-        assert!(style_lines.iter().any(|l| l.starts_with("Style: Override0,") && l.contains("&H0000FF")));
+        // Override0's PrimaryColour is #FF0000 as an ASS Style-line colour:
+        // 8-hex &HAABBGGRR (leading alpha byte 00), same form every other
+        // Style line here uses -- not the alpha-less inline `\c` form.
+        assert!(style_lines.iter().any(|l| l.starts_with("Style: Override0,") && l.contains("&H000000FF")));
 
         // "one two" (base, 4/line but only 2 words before the override
         // starts) then "three" and "four" as their own 1-word chunks

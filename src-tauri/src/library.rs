@@ -919,13 +919,14 @@ mod tests {
         init_schema(&conn).unwrap();
         let mut cooking = sample_project("cooking", 100);
         cooking.title = "My Cooking Video".to_string();
+        cooking.state = serde_json::json!({"words": [{"word": "garlic", "start": 0.0, "end": 0.5}, {"word": "pasta", "start": 0.5, "end": 1.0}]});
         insert_project(&conn, &cooking).unwrap();
         let mut gym = sample_project("gym", 200);
         gym.title = "Garage Gym Build".to_string();
         insert_project(&conn, &gym).unwrap();
 
         // "gar" is a real prefix of both "garlic" (only in cooking's own
-        // sample_project transcript) and "Garage" (gym's title).
+        // transcript) and "Garage" (gym's title).
         let mut hits: Vec<String> = search_projects_in(&conn, "gar").unwrap().into_iter().map(|p| p.id).collect();
         hits.sort();
         assert_eq!(hits, vec!["cooking".to_string(), "gym".to_string()]);
