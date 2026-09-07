@@ -11,6 +11,7 @@ import Timeline from "./Timeline.jsx";
 import ToolCard from "./ToolCard.jsx";
 import TranscribeStatus from "./TranscribeStatus.jsx";
 import VoiceoverSection from "./VoiceoverSection.jsx";
+import { RuntimePackGate } from "../../lib/runtimePacks.jsx";
 
 function MainPanel(props) {
   // Lifted to AppShell.jsx so TranscriptPanel's "Change theme" link (a
@@ -164,12 +165,14 @@ function MainPanel(props) {
             />
           )}
 
-          <VoiceoverSection
-            videoPath={props.videoPath}
-            projectId={props.currentProjectId}
-            onVoiceoverReady={props.onVoiceoverReady}
-            onCaptionsFromRecording={props.onCaptionsFromRecording}
-          />
+          <RuntimePackGate need="python-voice">
+            <VoiceoverSection
+              videoPath={props.videoPath}
+              projectId={props.currentProjectId}
+              onVoiceoverReady={props.onVoiceoverReady}
+              onCaptionsFromRecording={props.onCaptionsFromRecording}
+            />
+          </RuntimePackGate>
 
           <LiveDictationPanel onCaptionsFromRecording={props.onCaptionsFromRecording} />
 
@@ -191,17 +194,19 @@ function MainPanel(props) {
               status={props.contentIdeas ? "Generated" : "Not generated yet"}
               badge="AI"
             >
-              <ContentIdeasPanel
-                words={props.words}
-                result={props.contentIdeas}
-                options={props.contentStrategyOptions}
-                hints={props.contentHints}
-                onHintsChange={props.setContentHints}
-                onSelectOption={props.selectContentStrategyOption}
-                generating={props.generatingContentIdeas}
-                error={props.contentIdeasError}
-                onGenerate={props.generateContentIdeas}
-              />
+              <RuntimePackGate need="llm">
+                <ContentIdeasPanel
+                  words={props.words}
+                  result={props.contentIdeas}
+                  options={props.contentStrategyOptions}
+                  hints={props.contentHints}
+                  onHintsChange={props.setContentHints}
+                  onSelectOption={props.selectContentStrategyOption}
+                  generating={props.generatingContentIdeas}
+                  error={props.contentIdeasError}
+                  onGenerate={props.generateContentIdeas}
+                />
+              </RuntimePackGate>
             </ToolCard>
           </div>
 

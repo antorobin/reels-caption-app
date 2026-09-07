@@ -2860,3 +2860,40 @@ footer {
   font-weight: 400;
   margin-left: 6px;
 }
+
+/* On-demand runtime pack gates (lib/runtimePacks.jsx, shell/RuntimePacksBanner.jsx) */
+.runtime-pack-gate {
+  border: 1px dashed #cfcfcf;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 8px 0;
+  background: #fafafa;
+}
+.runtime-pack-gate-text {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: #555;
+}
+.runtime-packs-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.runtime-packs-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+.runtime-packs-name {
+  color: #444;
+}
+.runtime-packs-list button {
+  padding: 4px 10px;
+  font-size: 12px;
+  flex: none;
+}

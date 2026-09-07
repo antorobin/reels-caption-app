@@ -4,6 +4,7 @@ import BurnExportButton from "./BurnExportButton.jsx";
 import MainPanel from "./MainPanel.jsx";
 import MenuBar from "./MenuBar.jsx";
 import OptionalModelsBanner from "./OptionalModelsBanner.jsx";
+import RuntimePacksBanner from "./RuntimePacksBanner.jsx";
 import Sidebar from "./Sidebar.jsx";
 import TranscriptPanel from "./TranscriptPanel.jsx";
 import UpdateBanner from "./UpdateBanner.jsx";
@@ -124,6 +125,7 @@ function AppShell(props) {
       <div className="bottom-left-stack">
         <BackgroundJobsBanner />
         <OptionalModelsBanner />
+        <RuntimePacksBanner />
         <UpdateBanner />
       </div>
     </div>
