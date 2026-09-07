@@ -833,6 +833,20 @@ footer {
   overflow-y: auto;
 }
 
+/* Panel *content* (transcript, tool panels, modal bodies) is classic
+   light-theme -- dark text on a light surface -- even though several of
+   its mounts sit inside the dark app shell (.shell-inspector-col,
+   .tool-card-body). Without an explicit light background + color here the
+   <h2> heading and .section-hint text fall back to :root's #1a1a1a and
+   render dark-on-dark against the shell chrome (near-invisible). Plain
+   hex, not var(--shell-*): those tokens hold dark-theme values for the
+   shell chrome, not this light content context -- same note as
+   .link-button and .schedule-list. */
+.inspector-panel {
+  background: #fff;
+  color: #1a1a1a;
+}
+
 .inspector-panel h2 {
   margin-top: 0;
   font-size: 15px;
