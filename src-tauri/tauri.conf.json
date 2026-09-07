@@ -60,7 +60,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCNzVFQjYxRjNDRjkyRjEKUldUeGtzL3pZZXQxYThyZ21aOEtQZm1IM0Z4TjQwREtkejhsNGdVemVsMlhGR3FGV1pvMkZyaTgK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI3ODRDNURCNkQyRTczN0YKUldSL2N5NXQyOFdFSnp6L1NZanBuak5oUExWM3VjeEUrelhBalM5Qnd2M003V3BMSVZacElINEcK",
       "endpoints": [
         "https://github.com/antorobin/reels-caption-app/releases/latest/download/latest.json"
       ]

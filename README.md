@@ -2866,6 +2866,42 @@ gaps — not something to have assumed away from just reading Tauri's docs:
   Fixed by adding an `npm run fetch-resources` step (same script a local
   dev setup already runs) right after `npm ci`, before the build.
 
+**Two further real findings from the next attempts, once the above two were
+fixed** — the build/sign/bundle steps themselves succeeded on all 3
+platforms after these, so this was genuinely the last of it:
+- **`TAURI_SIGNING_PRIVATE_KEY` had never actually been added as a repo
+  secret at all** (confirmed directly via the Actions secrets API — zero
+  secrets existed), despite the setup note above always having said to.
+  Once added, a *second* mistake happened correcting a red herring:
+  `~/.tauri/reels-caption-app.key` looked "double base64-encoded" at a
+  glance and was (wrongly) "fixed" by decoding it once — that broke it
+  further, with a different, more specific error (`failed to decode
+  base64 key: Invalid symbol 32, offset 9` — offset 9 is exactly the
+  space after "untrusted" in the comment line). The file's original,
+  single-line, base64-wrapped-whole-file form was correct all along —
+  that *is* Tauri's real documented convention for delivering a
+  multi-line key through a single-line CI secret cleanly. Restored from
+  a backup taken before the wrong "fix," and re-set as the secret.
+- **The corrected private key's real public half didn't match
+  `tauri.conf.json`'s baked-in `pubkey`** — two genuinely different
+  keypairs (confirmed by decoding both and comparing their minisign key
+  IDs directly: `2784C5DB6D2E737F` vs. the configured `6B75EB61F3CF92F1`),
+  not a formatting issue this time. The original keypair matching that
+  configured pubkey isn't recoverable (no backup exists anywhere) — since
+  v0.1.0 was only ever "a first test release" with no real installs
+  auto-updating from it, decided to rotate rather than chase a lost key:
+  `tauri.conf.json`'s `pubkey` now matches the private key that actually
+  exists and is the one in the repo secret. Any future key loss/rotation
+  needs both sides changed together like this — see the backup note above
+  for why that's worth actually doing this time.
+- **The default `GITHUB_TOKEN` this workflow gets is read-only** (a repo-
+  level setting, invisible from this file) — `tauri build`/sign/bundle all
+  succeeded, then release creation itself failed with `Resource not
+  accessible by integration`. Fixed with an explicit `permissions:
+  contents: write` on the job — the minimum tauri-action actually needs
+  to create the release and upload assets, rather than changing the
+  repo-wide default.
+
 **What this workflow does NOT cover**: the large asset archives
 (`dev-resources.tar.gz`, `optional-models.tar.gz`) are a separate,
 still-manual `gh release upload <tag> ... --clobber` step (see "Publishing
