@@ -122,10 +122,10 @@ async function buildEnv(name) {
     // sdist-only but are pure Python -- they "build" with no compiler.
     // pip still errors loudly if anything actually needs to compile.
     const req = await readFile(reqPath, "utf8");
-    const gitLine = req.split("\n").find((l) => l.trim().startsWith("openvoice") && l.includes("git+"));
+    const gitLine = req.split("\n").map((l) => l.trim()).find((l) => l.startsWith("git+"));
     const rest = req
       .split("\n")
-      .filter((l) => l.trim() && !l.trim().startsWith("#") && !l.includes("git+"))
+      .filter((l) => l.trim() && !l.trim().startsWith("#") && !l.trim().startsWith("git+"))
       .join("\n");
     const restPath = join(OUT_DIR, `_req-${name}.txt`);
     const { writeFile } = await import("node:fs/promises");

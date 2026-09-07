@@ -19,8 +19,10 @@
 
 torch==2.5.1+cpu
 
-# Installed with --no-deps (see scripts/build-python-runtime.mjs):
-openvoice-cli @ git+https://github.com/myshell-ai/OpenVoice.git
+# Installed with --no-deps (see scripts/build-python-runtime.mjs). Bare
+# git URL, not `name @ git+...`: the PEP 508 form made pip look up an
+# unrelated `openvoice-cli` on PyPI instead of using the repo.
+git+https://github.com/myshell-ai/OpenVoice.git
 
 # OpenVoice's real runtime deps, modern versions with wheels:
 soundfile==0.12.1
