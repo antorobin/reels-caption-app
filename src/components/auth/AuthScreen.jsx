@@ -56,7 +56,7 @@ function AuthScreen() {
 
   return (
     <div className="container auth-screen">
-      <h1>Reels Caption App</h1>
+      <h1>KraftReel.App</h1>
       <p className="subtitle">{mode === "login" ? "Log in to continue" : "Create an account"}</p>
 
       <form className="card" onSubmit={handleSubmit}>

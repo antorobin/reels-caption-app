@@ -45,7 +45,7 @@ fn show_main_window(app: &AppHandle) {
     }
 
     let Ok(builder) = WebviewWindowBuilder::new(app, MAIN_WINDOW_LABEL, WebviewUrl::default())
-        .title("Reels Caption App")
+        .title("KraftReel.App")
         .inner_size(700.0, 700.0)
         .resizable(true)
         .build()

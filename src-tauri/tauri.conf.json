@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2.0.0",
-  "productName": "Reels Caption App",
+  "productName": "KraftReel.App",
   "version": "0.2.0",
   "identifier": "com.yourname.reelscaptionapp",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Reels Caption App",
+        "title": "KraftReel.App",
         "width": 700,
         "height": 700,
         "resizable": true,

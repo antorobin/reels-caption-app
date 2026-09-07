@@ -8,7 +8,7 @@ function MenuBar() {
 
   return (
     <header className="shell-menubar">
-      <span className="shell-menubar-brand">🎬 Reels Caption App</span>
+      <span className="shell-menubar-brand">🎬 KraftReel.App</span>
       <nav className="shell-menubar-menu">
         <button type="button" className="shell-menubar-item" onClick={() => setSettingsOpen(true)}>
           Settings

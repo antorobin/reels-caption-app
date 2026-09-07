@@ -235,7 +235,7 @@ fn wait_for_oauth_redirect() -> Result<String, String> {
         }
 
         if let Some(code) = query_param(&url, "code") {
-            let body = "<html><body><p>Instagram connected — you can close this tab and return to Reels Caption App.</p></body></html>";
+            let body = "<html><body><p>Instagram connected — you can close this tab and return to KraftReel.App.</p></body></html>";
             let _ = request.respond(tiny_http::Response::from_string(body).with_header(
                 tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html"[..]).unwrap(),
             ));

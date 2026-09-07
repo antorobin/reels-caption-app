@@ -1,4 +1,4 @@
-# Reels Caption App
+# KraftReel.App
 
 A local-first **Tauri (Rust) + React** app that captions video: pick a
 video → extract audio + transcribe & align with word-level timestamps
@@ -2176,7 +2176,7 @@ produces every relevant format for whichever platform runs it.
 ```bash
 npm run tauri build -- --bundles msi
 ```
-Output: `src-tauri/target/release/bundle/msi/Reels Caption App_0.1.0_x64_en-US.msi`.
+Output: `src-tauri/target/release/bundle/msi/KraftReel.App_0.2.0_x64_en-US.msi`.
 Drop `-- --bundles msi` to also get the NSIS `.exe` installer
 (`bundle/nsis/*-setup.exe`) alongside it — `targets: "all"` builds both by
 default. First MSI build downloads the WiX Toolset v3 automatically
