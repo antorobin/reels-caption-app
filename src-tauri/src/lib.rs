@@ -138,7 +138,7 @@ pub fn run() {
             proc_cleanup::init_kill_on_exit();
 
             tray::init(app.handle())?;
-            dictation::init(app.handle())?;
+            dictation::init(app.handle());
             app.manage(streaming_stt::LiveDictationState::default());
             app.manage(streaming_stt::LiveWorkerState::default());
 

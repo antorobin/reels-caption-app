@@ -77,10 +77,15 @@ pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: tauri_plugin
 
 /// Registers the shortcut itself -- needs an `AppHandle`, so this runs
 /// from `lib.rs`'s `setup()`, after the plugin above is already installed.
-/// Returns `Box<dyn Error>` (matching `setup()`'s own hook signature)
-/// rather than `tauri::Result` since the global-shortcut plugin's error
-/// type doesn't convert into `tauri::Error` directly.
-pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    app.global_shortcut().register(dictation_shortcut())?;
-    Ok(())
+///
+/// Deliberately infallible: a global hotkey is a shared OS resource, and
+/// `register()` fails with "HotKey already registered" whenever another
+/// app -- or a second/stale instance of this one -- already holds
+/// `Ctrl+Shift+D`. That must not brick startup (it used to panic the whole
+/// setup hook). On failure the hotkey HUD just isn't reachable; the in-app
+/// "Live dictation" panel still works.
+pub fn init(app: &AppHandle) {
+    if let Err(e) = app.global_shortcut().register(dictation_shortcut()) {
+        eprintln!("dictation: couldn't register the Ctrl+Shift+D global hotkey ({e}); the hotkey HUD is disabled this session. Use the in-app Live dictation panel instead.");
+    }
 }
