@@ -44,8 +44,11 @@ jobs:
       matrix:
         include:
           - platform: windows-latest
+            args: "--bundles msi,nsis"
           - platform: macos-latest
+            args: "--bundles dmg"
           - platform: ubuntu-22.04
+            args: "--bundles deb,appimage"
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +83,7 @@ jobs:
             Installed copies update themselves via latest.json.
           releaseDraft: false
           prerelease: false
+          args: ${{ matrix.args }}
 
   # ---------------------------------------------------------- components --
   components:
