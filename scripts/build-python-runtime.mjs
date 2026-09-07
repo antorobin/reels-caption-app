@@ -117,6 +117,10 @@ async function buildEnv(name) {
     // OpenVoice: its own pinned deps don't have modern wheels. Install the
     // git package alone, then its real deps from the same requirements
     // file (which lists both, the git line and the explicit deps).
+    // `--prefer-binary` here, not `--only-binary=:all:`: a few of
+    // OpenVoice's text-processing deps (eng-to-ipa, jieba, cn2an) ship
+    // sdist-only but are pure Python -- they "build" with no compiler.
+    // pip still errors loudly if anything actually needs to compile.
     const req = await readFile(reqPath, "utf8");
     const gitLine = req.split("\n").find((l) => l.trim().startsWith("openvoice") && l.includes("git+"));
     const rest = req
@@ -126,8 +130,8 @@ async function buildEnv(name) {
     const restPath = join(OUT_DIR, `_req-${name}.txt`);
     const { writeFile } = await import("node:fs/promises");
     await writeFile(restPath, rest);
-    run(py, ["-m", "pip", "install", "--only-binary=:all:", "-r", restPath]);
-    if (gitLine) run(py, ["-m", "pip", "install", "--no-deps", gitLine.trim()]);
+    run(py, ["-m", "pip", "install", "--prefer-binary", "-r", restPath]);
+    if (gitLine) run(py, ["-m", "pip", "install", "--no-deps", "--prefer-binary", gitLine.trim()]);
     rmSync(restPath, { force: true });
   } else {
     run(py, ["-m", "pip", "install", "--only-binary=:all:", "-r", reqPath]);

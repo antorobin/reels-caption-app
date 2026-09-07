@@ -10,8 +10,10 @@
 # ourselves -- this is what README section 2.7 already documents for the
 # conda path; the build script passes --no-deps for the git package only.
 #
-# Pin to your known-good conda `voice-clone` env:
-#   conda run -n voice-clone python -m pip freeze
+# build-python-runtime.mjs installs THIS env with `--prefer-binary`, not
+# `--only-binary=:all:`: eng-to-ipa / jieba / cn2an are sdist-only but
+# pure Python (no compiler). `--pack=all` failed here on eng-to-ipa under
+# the stricter flag; --prefer-binary gets past it.
 
 --extra-index-url https://download.pytorch.org/whl/cpu
 
