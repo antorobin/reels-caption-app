@@ -1,0 +1,27 @@
+# "stt" environment -- English (Parakeet / onnx-asr) + Indic Whisper
+# (faster-whisper) transcription, and the live-dictation worker.
+#
+# This is the LIGHT env: pure ONNX Runtime + CTranslate2, no PyTorch. It is
+# the one bundled into the base MSI (see scripts/build-python-runtime.mjs
+# and tauri.conf.json's bundle.resources) so caption transcription works
+# with zero setup.
+#
+# Every package here publishes a prebuilt win_amd64 wheel -- installing
+# with `--only-binary=:all:` must succeed with no compiler. If it doesn't,
+# that's the signal a version needs bumping, not that conda is required.
+#
+# Pin to whatever your known-good conda `stt` env reports:
+#   conda run -n stt python -m pip freeze
+# and paste the exact `==` versions below before building a release pack.
+
+faster-whisper==1.1.0
+onnx-asr[cpu,hub]==0.6.0
+soundfile==0.12.1
+
+# Transitive, pinned explicitly so a pack rebuild can't drift the runtime:
+onnxruntime==1.20.1
+ctranslate2==4.5.0
+huggingface-hub==0.27.1
+numpy==2.2.1
+av==13.1.0
+tokenizers==0.21.0

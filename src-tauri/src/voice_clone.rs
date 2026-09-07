@@ -70,13 +70,12 @@ static VOICE_CLONE_PREFIX_CACHE: tokio::sync::OnceCell<PathBuf> = tokio::sync::O
 async fn resolve_voice_clone_prefix() -> Result<PathBuf, String> {
     let prefix = VOICE_CLONE_PREFIX_CACHE
         .get_or_try_init(|| async {
-            let conda = crate::conda_util::resolve_conda_env(
+            crate::python_env::resolve_env_prefix(
                 VOICE_CLONE_ENV_NAME,
                 &["python", "-c", "import openvoice, torch"],
                 "REELS_CAPTION_APP_VOICE_CLONE_CONDA_PATH",
             )
-            .await?;
-            crate::conda_util::resolve_conda_env_prefix(&conda, VOICE_CLONE_ENV_NAME).await
+            .await
         })
         .await?;
     Ok(prefix.clone())

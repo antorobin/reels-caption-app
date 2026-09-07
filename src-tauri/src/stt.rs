@@ -74,13 +74,12 @@ static STT_PREFIX_CACHE: tokio::sync::OnceCell<PathBuf> = tokio::sync::OnceCell:
 async fn resolve_stt_prefix() -> Result<PathBuf, String> {
     let prefix = STT_PREFIX_CACHE
         .get_or_try_init(|| async {
-            let conda = crate::conda_util::resolve_conda_env(
+            crate::python_env::resolve_env_prefix(
                 STT_ENV_NAME,
                 &["python", "-c", "import onnx_asr, faster_whisper"],
                 "REELS_CAPTION_APP_STT_CONDA_PATH",
             )
-            .await?;
-            crate::conda_util::resolve_conda_env_prefix(&conda, STT_ENV_NAME).await
+            .await
         })
         .await?;
     Ok(prefix.clone())

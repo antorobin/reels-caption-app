@@ -8,7 +8,10 @@
 // every media-ai script here is a fast, one-shot CPU operation — a
 // fresh `conda run` subprocess per call is simple and fast enough.
 //
-// Setup (not bundled — see README): a conda environment named "media-ai":
+// Environment: a bundled relocatable Python (`resources/python/media-ai/`,
+// built by scripts/build-python-runtime.mjs) when present, otherwise a
+// system conda env named "media-ai" -- see python_env.rs for the full
+// resolution order. Dev fallback env:
 //   conda create -n media-ai python=3.11 -y
 //   conda run -n media-ai pip install -qU mediapipe librosa scipy numpy
 
@@ -20,17 +23,28 @@ use crate::util::{cli_path, emit_progress};
 
 pub const MEDIA_AI_ENV_NAME: &str = "media-ai";
 
-pub async fn resolve_media_ai_conda() -> Result<String, String> {
-    crate::conda_util::resolve_conda_env(
-        MEDIA_AI_ENV_NAME,
-        // `mp.solutions` is an attribute set at package-init time, not a
-        // real importable submodule — `import mediapipe.solutions.x` fails
-        // even when `mp.solutions.x` works fine as attribute access.
-        // Confirmed empirically against the pinned mediapipe==0.10.9 build.
-        &["python", "-c", "import mediapipe as mp; mp.solutions.face_mesh; import librosa, scipy, numpy"],
-        "REELS_CAPTION_APP_MEDIA_AI_CONDA_PATH",
-    )
-    .await
+static MEDIA_AI_PREFIX_CACHE: tokio::sync::OnceCell<PathBuf> = tokio::sync::OnceCell::const_new();
+
+/// Resolves (and caches) the "media-ai" env prefix, then hands back the
+/// env's own `python` executable -- called directly, never via `conda
+/// run` (see python_env.rs / conda_util.rs on why).
+async fn media_ai_python() -> Result<PathBuf, String> {
+    let prefix = MEDIA_AI_PREFIX_CACHE
+        .get_or_try_init(|| async {
+            crate::python_env::resolve_env_prefix(
+                MEDIA_AI_ENV_NAME,
+                // `mp.solutions` is an attribute set at package-init time,
+                // not a real importable submodule — `import
+                // mediapipe.solutions.x` fails even when `mp.solutions.x`
+                // works fine as attribute access. Confirmed empirically
+                // against the pinned mediapipe==0.10.9 build.
+                &["python", "-c", "import mediapipe as mp; mp.solutions.face_mesh; import librosa, scipy, numpy"],
+                "REELS_CAPTION_APP_MEDIA_AI_CONDA_PATH",
+            )
+            .await
+        })
+        .await?;
+    Ok(crate::python_env::python_exe(prefix))
 }
 
 /// Resolves a script under `src-tauri/media_ai/` at compile time — a
@@ -55,21 +69,20 @@ pub async fn run_media_ai_script(
     project_id: &str,
     stage: &str,
 ) -> Result<String, String> {
-    let conda = resolve_media_ai_conda().await?;
+    let python = media_ai_python().await?;
     let script_path_arg = cli_path(&media_ai_script_path(script));
 
     emit_progress(app, event_name, project_id, stage, None, Some(format!("Running {script}…")));
 
-    let mut full_args =
-        vec!["run".to_string(), "-n".to_string(), MEDIA_AI_ENV_NAME.to_string(), "python".to_string(), script_path_arg];
+    let mut full_args = vec![script_path_arg];
     full_args.extend(args);
 
-    let output = Command::new(&conda)
+    let output = Command::new(&python)
         .args(&full_args)
         .env("PYTHONIOENCODING", "utf-8")
         .output()
         .await
-        .map_err(|e| format!("Failed to run {script} via conda: {e}"))?;
+        .map_err(|e| format!("Failed to run {script}: {e}"))?;
 
     if !output.status.success() {
         return Err(format!("{script} failed: {}", String::from_utf8_lossy(&output.stderr)));

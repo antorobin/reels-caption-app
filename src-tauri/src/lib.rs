@@ -43,6 +43,7 @@ mod model_fetch;
 mod music_gen;
 mod pipeline;
 mod proc_cleanup;
+mod python_env;
 mod scheduler;
 mod segments;
 mod slang;
@@ -127,6 +128,7 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .setup(|app| {
             bin_paths::init(app.handle());
+            python_env::init(app.handle());
             // Order matters: clear out anything orphaned by a *previous*
             // run first, then set up the job object that keeps *this*
             // run's own children from ever doing the same.

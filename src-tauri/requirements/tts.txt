@@ -1,0 +1,19 @@
+# "tts" environment -- Piper (English) + MMS-TTS (Indian languages)
+# voiceover synthesis, and MusicGen background-music generation
+# (music_gen.rs reuses this same env).
+#
+# HEAVY env: pulls PyTorch (CPU). Not in the base MSI -- shipped in the
+# optional "voice & effects" pack (scripts/build-python-runtime.mjs
+# --pack=extras) and fetched on first use via the model_fetch.rs flow.
+#
+# torch comes from PyTorch's own CPU index, not PyPI -- the build script
+# passes the extra index url. Pin to your known-good conda `tts` env:
+#   conda run -n tts python -m pip freeze
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.5.1+cpu
+piper-tts==1.2.0
+transformers==4.47.1
+scipy==1.15.0
+numpy==2.2.1

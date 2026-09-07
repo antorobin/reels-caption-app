@@ -52,13 +52,12 @@ static TTS_PREFIX_CACHE: tokio::sync::OnceCell<PathBuf> = tokio::sync::OnceCell:
 pub(crate) async fn resolve_tts_prefix() -> Result<PathBuf, String> {
     let prefix = TTS_PREFIX_CACHE
         .get_or_try_init(|| async {
-            let conda = crate::conda_util::resolve_conda_env(
+            crate::python_env::resolve_env_prefix(
                 TTS_ENV_NAME,
                 &["python", "-c", "import piper, transformers"],
                 "REELS_CAPTION_APP_TTS_CONDA_PATH",
             )
-            .await?;
-            crate::conda_util::resolve_conda_env_prefix(&conda, TTS_ENV_NAME).await
+            .await
         })
         .await?;
     Ok(prefix.clone())

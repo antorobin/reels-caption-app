@@ -2476,19 +2476,36 @@ build to populate `resources/bin/`, `resources/llama/`, and
 drop described above — `tauri build` then bundles whatever it finds there
 automatically, no separate steps needed.
 
-**The `stt`/`tts`/`media-ai`/`voice-clone` conda environments are still
-not bundled** (unlike the old MFA "aligner" env, which could be
-`conda-pack`ed into the installer) — end users still need a system conda
-env set up per sections 2/2.4/2.6/2.7. This is a real regression in "zero
-end-user setup" versus what the old MFA-bundling path offered; worth
-revisiting `conda-pack` now that `stt`'s own dependency surface is lighter
-than it used to be (dropping WhisperX, section 2.2, leaves just
-`faster-whisper`, `onnx-asr`, and `soundfile` — no PyTorch/transformers/
-torchaudio for that one env specifically). Model *files* are a separate,
-now-solved problem — see 6.1's "In-app model download": the Tamil
-transcription and voice-cloning checkpoints fetch themselves on demand,
-it's specifically the Python packages/environments that still need
-manual setup.
+**Bundled Python environments (replacing the conda requirement).** The
+`stt`/`tts`/`media-ai`/`voice-clone` conda envs are being replaced by
+**relocatable, bundled Python environments** — one self-contained
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+interpreter plus that feature's pinned wheels, per env, shipped as an app
+resource. `src-tauri/src/python_env.rs` resolves them at runtime *ahead
+of* any system conda, so:
+
+- **`resources/python/<env>/` present** → used directly (no conda).
+- **absent** → falls back to the existing system-conda discovery,
+  unchanged, so a dev box that hasn't built the packs keeps working
+  exactly as sections 2 / 2.4 / 2.6 / 2.7 describe.
+
+Build them with `node scripts/build-python-runtime.mjs --pack=core`
+(`stt` only, ~300 MB, goes in the MSI so transcription works out of the
+box) and `--pack=extras` (`tts` + `media-ai` + `voice-clone`, ~2.5 GB,
+shipped as an optional "voice & effects" pack fetched on first use via
+`model_fetch.rs`). `--only-binary=:all:` is enforced — every dependency
+must resolve to a prebuilt wheel; if one doesn't, bump its pin rather than
+reaching back for conda. Full walkthrough and the installer wiring are in
+[`docs/RUNTIME-PACKS.md`](docs/RUNTIME-PACKS.md); the companion
+[`docs/MINIMAL-FFMPEG.md`](docs/MINIMAL-FFMPEG.md) covers trimming the
+484 MB of full-build ffmpeg/ffprobe down to ~80 MB (the one catch:
+`librubberband`, which stock prebuilt ffmpeg lacks and `tts.rs`'s emotion
+pitch-shift needs).
+
+Model *files* were already a solved problem — see 6.1's "In-app model
+download": the Tamil transcription and voice-cloning checkpoints fetch
+themselves on demand. This closes the remaining gap, the Python
+packages/environments themselves.
 
 ---
 

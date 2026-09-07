@@ -1,0 +1,17 @@
+# "media-ai" environment -- voice-over sync (mediapipe face landmarks),
+# vocal-emphasis / prosody (librosa), speaker diarization (scipy).
+#
+# No PyTorch. mediapipe is pinned to 0.10.9 deliberately: newer releases
+# dropped the legacy `mp.solutions.face_mesh` API this app's vo_sync.py
+# uses, keeping only the Tasks API (which needs a separate .task model
+# download). 0.10.9 has win_amd64 wheels for CPython <= 3.11 ONLY -- the
+# bundled python-build-standalone interpreter for this env must be 3.11.x.
+#
+# Part of the optional "voice & effects" pack, not the base MSI.
+# Pin to your known-good conda `media-ai` env:
+#   conda run -n media-ai python -m pip freeze
+
+mediapipe==0.10.9
+librosa==0.10.2.post1
+scipy==1.15.0
+numpy==1.26.4
