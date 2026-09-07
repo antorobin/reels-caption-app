@@ -2164,106 +2164,101 @@ this repo already has one, so building "just works."
 
 ## 6.1. Build & distribute (Windows / macOS / Linux)
 
-`npm run tauri build` runs `vite build` then compiles the Rust backend in
-release mode and bundles installers for **whatever OS you run it on** —
-Tauri does not cross-compile a GUI app for a different OS from one
-machine (WebView2/WKWebView/webkit2gtk are all platform-native). To ship
-installers for all three, build on all three, natively or via CI (see
-"CI matrix" below) — there's no single command that produces all of them
-from one machine.
+Tauri does not cross-compile a GUI app for another OS — build on each OS
+you want to ship (natively or via CI). `.github/workflows/release.yml`
+does all three on a `v*.*.*` tag; the commands below are what it runs.
 
-`bundle.targets: "all"` in `tauri.conf.json` means "every installer format
-this OS supports," not "every OS" — so `npm run tauri build` alone already
-produces every relevant format for whichever platform runs it.
+### The two builds
 
-### Windows — MSI specifically
+| | Command | Bundles | Size | Prereqs |
+|---|---|---|---|---|
+| **Slim** (default) | `npm run build:slim` | app + fonts only | ~6 MB MSI (measured) | none |
+| **Full** (offline) | `npm run build:full` | app + the entire runtime | ~2–3 GB MSI | resource dirs populated (below) |
 
-**Slim installer (default).** Bundles only the app + fonts; the runtime
-(ffmpeg, the `stt`/voice Python envs, the LLM) is fetched on first launch
-/ first use by `runtime_fetch.rs`. Needs no populated resource dirs.
-```bash
-npm run build:slim
-```
-Output: `src-tauri/target/release/bundle/msi/KraftReel.App_0.2.0_x64_en-US.msi`
-(~6 MB, measured). `release.yml` builds this per OS (`.msi` / `.dmg` /
-`.deb` + `.AppImage`). The app is inert until `components.json`'s asset
-URLs/checksums are published by the pipeline — Windows packs first;
-macOS/Linux packs slot into the same manifest by platform (see
-`docs/RUNTIME-PACKS.md`).
+Both write to `src-tauri/target/release/bundle/msi/KraftReel.App_<version>_x64_en-US.msi`
+(and `bundle/dmg/`, `bundle/deb/`, `bundle/appimage/` on the other OSes).
+`build:slim` is `tauri build --bundles msi`; `build:full` is the same with
+`--config src-tauri/tauri.full.conf.json`, which re-adds every resource to
+`bundle.resources`.
 
-**Full installer (offline).** Bundles the whole runtime, no first-run
+**Slim** ships almost nothing: `runtime_fetch.rs` downloads a minimal
+ffmpeg + the `stt` Python env on first launch (the `<RuntimeSetup>`
+screen), and the LLM / voice-and-effects packs the first time a feature
+needs them (`<RuntimePackGate>`). It is **inert until a release publishes
+`components.json` with real asset URLs and checksums** — so for a local
+test that isn't wired to a release, build **Full**.
+
+**Full** bundles the whole runtime, works offline, needs no first-run
 download. Populate the resource dirs first:
+
 ```bash
-npm run fetch-resources
-node scripts/build-python-runtime.mjs --pack=all
+npm run fetch-resources                          # -> resources/{bin,llama,tts-models}
+node scripts/build-python-runtime.mjs --pack=all # -> resources/python/{stt,tts,media-ai,voice-clone}
 npm run build:full
 ```
-Output: the same path, ~2–3 GB. Ship both from CI — slim for everyone,
-full for air-gapped users.
-Drop `-- --bundles msi` to also get the NSIS `.exe` installer
-(`bundle/nsis/*-setup.exe`) alongside it — `targets: "all"` builds both by
-default. First MSI build downloads the WiX Toolset v3 automatically
-(needs internet, one-time, cached after); `.exe`/NSIS similarly downloads
-`makensis`.
+
+### First-build downloads (one-time, need internet)
+
+- **WiX Toolset v3** — the MSI bundler. `tauri build` fetches + caches it
+  automatically on the first Windows build.
+- **NSIS `makensis`** — only if you drop `--bundles msi` to also get the
+  `.exe` installer (`bundle/nsis/*-setup.exe`).
+
+### Exit code note
+
+With `createUpdaterArtifacts: true` (the default) and no
+`TAURI_SIGNING_PRIVATE_KEY` set, the build **prints the MSI path, then
+exits 1** on the OTA-signing step (`"A public key has been found, but no
+private key"`). The installer is complete — that last step is CI-only.
+`tauri.full.conf.json` sets `createUpdaterArtifacts: false` so `build:full`
+exits clean without the key.
+
+### Cutting a real release
+
+```bash
+# bump `version` in src-tauri/tauri.conf.json AND package.json, commit
+git tag v0.3.0 && git push origin v0.3.0
+```
+`release.yml` then builds + signs the slim installers per OS, builds the
+component packs (`scripts/pack-components.mjs`), builds the Full Windows
+installer, and uploads everything + `latest.json` + `components.json` to
+the tag's Release. See `docs/RUNTIME-PACKS.md` for the pack layout.
 
 ### macOS
 
-Run the same command on a Mac:
-```bash
-npm run tauri build
-```
-Output: `src-tauri/target/release/bundle/dmg/*.dmg` and `macos/*.app`.
-Needs Xcode Command Line Tools (`xcode-select --install`). An unsigned
-`.app`/`.dmg` triggers Gatekeeper's "unidentified developer" warning on
-first launch (right-click → Open bypasses it) — real code signing +
-notarization needs an active Apple Developer account, out of scope for a
-test build.
+Same two commands on a Mac — `npm run build:slim` / `npm run build:full`
+(the latter needs `fetch-resources` + `build-python-runtime.mjs
+--pack=all` run on the Mac first, so the envs are mac-native).
+Output: `bundle/dmg/*.dmg` and `bundle/macos/*.app`. Needs Xcode Command
+Line Tools (`xcode-select --install`). An unsigned `.app`/`.dmg` trips
+Gatekeeper's "unidentified developer" warning (right-click → Open bypasses
+it); real signing + notarization needs an Apple Developer account.
 
 ### Linux
 
-Same command on a Linux machine:
-```bash
-npm run tauri build
-```
-Output depends on what's installed on the build machine: `.deb`
-(`bundle/deb/*.deb`, needs `dpkg`), `.rpm` (`bundle/rpm/*.rpm`, needs
-`rpmbuild`), and `.AppImage` (`bundle/appimage/*.AppImage`, portable,
-runs without installing). Needs `webkit2gtk`/`libayatana-appindicator`
-and friends — see
-[Tauri's Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux)
-for the exact package list per distro.
-
-### CI matrix (the practical way to get all three from one push)
-
-[`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action) is
-the standard GitHub Actions workflow for this: a 3-OS build matrix
-(`windows-latest`, `macos-latest`, `ubuntu-22.04`), each running `npm run
-tauri build` natively and uploading its own installers as release assets.
-**Set up as `.github/workflows/release.yml`**, triggered by pushing a
-version tag (`git push origin v0.2.0`) — see section 9.2's "Cutting a
-signed release" for the full flow, including the one-time repo secrets it
-needs for signing.
+Same commands on a Linux machine. Output depends on what's installed:
+`.deb` (`bundle/deb/`, needs `dpkg`), `.rpm` (`bundle/rpm/`, needs
+`rpmbuild`), `.AppImage` (`bundle/appimage/`, portable). Needs
+`webkit2gtk` / `libayatana-appindicator` and friends — see
+[Tauri's Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux).
 
 ### What a fresh install actually gets you
 
-The installer bundles ffmpeg/ffprobe, the local LLM (llama.cpp +
-Qwen2.5-0.5B-Instruct), Piper's English voice, and the Tamil font —
-**English caption styling/burning, silence removal, English voiceover, and
-title/hashtag generation all work immediately after install, no setup.**
+**Full installer** — everything works offline immediately: transcription
+(EN + Tamil), captions, burn-in, voiceover, music, the LLM tools. No
+setup, no conda. (`piper-tts` currently has no Windows wheel, so English
+Piper voiceover in the bundled `tts` env is pending a native-`piper`
+component — English falls back to the gender/default voice until then;
+Tamil MMS-TTS and MusicGen are unaffected.)
 
-**Tamil transcription and voice cloning** need one more model download
-(the Tamil Whisper checkpoint + the OpenVoice converter checkpoint, ~360MB
-combined) that's deliberately not baked into the installer — see "In-app
-model download" below, which handles this with one click, no terminal
-required. **Every conda environment (`stt`/`tts`/`media-ai`/
-`voice-clone`) is still a manual, per-machine setup step** (sections 2,
-2.4, 2.6, 2.7) regardless of that download — those need real Python
-packages installed (torch, transformers, faster-whisper, openvoice...),
-a meaningfully bigger scope (bundling a whole Python distribution) this
-project has deliberately kept out of the installer. Worth saying plainly
-to anyone you hand this to: **installing the MSI alone does not give you
-working transcription of any language** — mention the conda setup steps,
-or they'll hit "STT engine not found" the moment they upload a video.
+**Slim installer** — after install it downloads a minimal ffmpeg + the
+`stt` env on first launch (~170 MB), then transcription/captions/burn
+work. The LLM and voice-and-effects packs download on first use of a
+feature that needs them. This requires a published release whose
+`components.json` has real URLs + checksums; a slim build from a plain
+`npm run build:slim` (no release behind it) will show the setup screen
+and then fail to download — use the Full installer for a disconnected
+test.
 
 ### In-app model download (Tamil transcription + voice cloning)
 
