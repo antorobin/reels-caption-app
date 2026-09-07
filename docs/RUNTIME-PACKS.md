@@ -47,44 +47,58 @@ torch trims hard — `torch/test/`, `torch/include/`, the `*.lib` import
 libs, and the CUDA `.dll`s in a CPU build are all removable (~300 MB off
 `tts`/`voice-clone`).
 
-## Wire into the installer
+## Two installers
 
-Add to `src-tauri/tauri.conf.json` → `bundle.resources` (only after the
-dir exists, or `tauri build` errors on the missing glob):
+| | Bundles | MSI size | How |
+|---|---|---|---|
+| **Slim** (default) | app + fonts only | ~20 MB | `npm run build:slim` |
+| **Full** (offline) | whole runtime | ~2–3 GB | populate resource dirs, then `npm run build:full` |
 
-```json
-"resources": {
-  "resources/bin/*": "bin/",
-  "resources/llama/*": "llama/",
-  "resources/tts-models": "tts-models",
-  "resources/fonts/*": "fonts/",
-  "resources/fonts-license/*": "fonts-license/",
-  "resources/python/stt/**/*": "python/stt/"
-}
+The slim installer ships nothing heavy; `runtime_fetch.rs` downloads the
+components on first launch (`tier: "core"`) and on first use of a feature
+(`tier: "on-demand"`). `src-tauri/tauri.full.conf.json` is the overlay
+that re-adds everything to `bundle.resources` for the offline build.
+
+## The component manager (`runtime_fetch.rs`)
+
+Driven by `src-tauri/components.json` — compiled in as the baseline,
+overridden at runtime by a hosted copy at `manifest_url`. Each component:
+
+```
+{ id, tier: "core"|"on-demand", version, url, sha256, size,
+  unpack_to,          # relative to ~/.reels-caption-app/runtime/
+  needed_for: [...] }  # feature ids, for the download-gate copy
 ```
 
-Do **not** add `resources/python/tts/**` etc. here — those ship in the
-optional pack.
+| Component | unpack_to | Archive contents | Compressed |
+|---|---|---|---|
+| `ffmpeg` | `bin` | `ffmpeg.exe`, `ffprobe.exe`, `*.dll` | ~30 MB |
+| `python-stt` | `python` | `stt/` | **~114 MB** (measured) |
+| `llm` | `llama` | `llama-server.exe`, `*.dll`, `*.gguf` | ~460 MB |
+| `python-voice` | `.` | `python/{tts,media-ai,voice-clone}/`, `tts-models/en/` | ~1 GB |
 
-## The optional "voice & effects" pack
+Commands: `list_runtime_components`, `missing_core_components` (drives the
+first-run screen), `download_runtime_component(id)` (resumable via HTTP
+`Range`, SHA-256-gated, unpacks with `tar -xf`). Progress arrives on the
+`runtime-component-progress` event with the component id in the
+`project_id` slot.
 
-`tar czf voice-effects-pack.tar.gz -C src-tauri/resources/python tts media-ai voice-clone`,
-attach it to the GitHub Release as `voice-effects-pack.tar.gz`, and extend
-`model_fetch.rs`:
+Resolution: `bin_paths.rs`, `python_env.rs`, `llm.rs`, `tts.rs` each check
+`~/.reels-caption-app/runtime/<...>` ahead of their bundled-resource path,
+so a downloaded component is found exactly like a bundled one — the slim
+and full builds take the same code path.
 
-- add a `voice_effects` field to `OptionalModelStatus`, checked by the
-  presence of `~/.reels-caption-app/python/tts/python.exe`
-- add its URL alongside `RELEASE_ASSET_URL`
-- `download_optional_models` (or a sibling command) fetches + untars it
-  into `~/.reels-caption-app/python/`
+## Build & publish (CI)
 
-`python_env.rs`'s `resolve_bundled_base` already checks the packaged
-resource dir; add `~/.reels-caption-app/python/` as a third candidate
-there so a downloaded pack is found the same way a bundled one is.
-
-## CI
-
-`release.yml` needs a step (Windows runner) that runs
-`build-python-runtime.mjs --pack=core`, prunes, and lets `tauri-action`
-bundle it; plus a job that builds `--pack=extras`, tars it, and uploads it
-as a release asset. Without CI this is an unrepeatable manual chore.
+```bash
+node scripts/build-python-runtime.mjs --pack=all     # resources/python/*
+npm run fetch-resources                               # resources/bin, resources/llama, resources/tts-models
+# ...replace resources/bin/{ffmpeg,ffprobe}.exe with a minimal build (docs/MINIMAL-FFMPEG.md)
+node scripts/pack-components.mjs --out dist/components --version <YYYY.N>
+```
+`pack-components.mjs` writes the `.tar.gz` archives, computes SHA-256s,
+and emits a filled `components.json`. `release.yml` uploads all of them as
+assets on the same Release the updater already reads. Until that runs, a
+slim build's `components.json` has empty checksums and the downloader
+refuses every component (override with
+`REELS_CAPTION_APP_ALLOW_UNVERIFIED_COMPONENTS=1` for local testing).

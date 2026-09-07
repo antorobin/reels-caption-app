@@ -2,23 +2,28 @@
 // feature (stt / tts / media-ai / voice-clone), preferring a *relocatable
 // Python* shipped inside the app over a system `conda` install.
 //
-// This is the piece that lets a plain MSI install "just work" with no
-// per-machine conda setup: `scripts/build-python-runtime.mjs` builds one
-// self-contained env per feature under `src-tauri/resources/python/<env>/`
-// (a python-build-standalone interpreter + that feature's pinned wheels),
-// `tauri.conf.json`'s `bundle.resources` ships them, and this module finds
-// them at runtime.
+// This is the piece that lets an install "just work" with no per-machine
+// conda setup. `scripts/build-python-runtime.mjs` builds one
+// self-contained env per feature (a python-build-standalone interpreter +
+// that feature's pinned wheels); the slim installer fetches them via
+// `runtime_fetch.rs` into `~/.reels-caption-app/runtime/python/<env>/`,
+// the full installer bundles them under `resources/python/<env>/` (see
+// `tauri.full.conf.json`), and this module finds either.
 //
 // Resolution order, first hit wins:
 //   1. `<env_var_override>` (e.g. REELS_CAPTION_APP_STT_CONDA_PATH) -- a
 //      hard override. Accepts either an env *prefix* directory (one that
 //      has `python.exe` / `bin/python3` in it) or, unchanged from before
 //      this module existed, a `conda(.exe)` binary path.
-//   2. A bundled relocatable env: `<resources>/python/<env_name>/`, via
+//   2. A component downloaded by `runtime_fetch.rs` into
+//      `~/.reels-caption-app/runtime/python/<env_name>/` -- the slim
+//      installer's path. Checked live, since the first-run flow can
+//      install it after startup.
+//   3. A bundled relocatable env: `<resources>/python/<env_name>/`, via
 //      Tauri's packaged resource dir in a real build, or
 //      `<CARGO_MANIFEST_DIR>/resources/python/<env_name>/` for `tauri dev`
 //      once the build script has populated it locally.
-//   3. System conda discovery (`conda_util`) -- the original behaviour,
+//   4. System conda discovery (`conda_util`) -- the original behaviour,
 //      untouched, for a dev machine that hasn't built the bundled runtime.
 //
 // Callers get an env *prefix* back and invoke `<prefix>/python(.exe)`
@@ -89,6 +94,14 @@ fn bundled_env_prefix(env_name: &str) -> Option<PathBuf> {
     env_prefix_in(base, env_name)
 }
 
+/// A component downloaded by `runtime_fetch.rs` into
+/// `~/.reels-caption-app/runtime/python/<env>/`. Checked *live* (not via
+/// the startup cache) because the first-run flow can install it after
+/// `init` has already run.
+fn downloaded_env_prefix(env_name: &str) -> Option<PathBuf> {
+    env_prefix_in(&crate::runtime_fetch::runtime_dir().join("python"), env_name)
+}
+
 /// Resolves the env *prefix* (its `sys.prefix` root, where `python.exe`
 /// lives) for one feature's environment. See the module comment for the
 /// full order. `probe_args` is only used on the conda fallback path (the
@@ -107,6 +120,10 @@ pub async fn resolve_env_prefix(
         // Back-compat: the override was set to a `conda(.exe)` path, the
         // only thing it could point at before bundled runtimes existed.
         return crate::conda_util::resolve_conda_env_prefix(&val, env_name).await;
+    }
+
+    if let Some(prefix) = downloaded_env_prefix(env_name) {
+        return Ok(prefix);
     }
 
     if let Some(prefix) = bundled_env_prefix(env_name) {

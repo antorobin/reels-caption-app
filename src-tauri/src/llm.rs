@@ -43,6 +43,13 @@ const LLAMA_SERVER_HOST: &str = "127.0.0.1";
 static SERVER_HANDLE: Mutex<Option<Child>> = Mutex::const_new(None);
 
 fn resource_path(app: &AppHandle, rel: &str) -> Option<PathBuf> {
+    // A downloaded runtime component (`runtime_fetch.rs`) -- the slim
+    // installer's path -- takes precedence over a bundled copy so a
+    // fetched update wins over a stale bundled one.
+    let downloaded = crate::runtime_fetch::runtime_dir().join(rel);
+    if downloaded.exists() {
+        return Some(downloaded);
+    }
     if let Ok(resource_dir) = app.path().resource_dir() {
         let candidate = resource_dir.join(rel);
         if candidate.exists() {

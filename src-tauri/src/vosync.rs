@@ -68,7 +68,7 @@ pub async fn sync_voice_over(
             "--voiceover".to_string(),
             voiceover_path,
             "--ffmpeg".to_string(),
-            cli_path(crate::bin_paths::ffmpeg_path()),
+            cli_path(&crate::bin_paths::ffmpeg_path()),
             "--out".to_string(),
             output_path,
         ],

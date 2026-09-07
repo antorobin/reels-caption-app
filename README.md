@@ -2178,16 +2178,25 @@ produces every relevant format for whichever platform runs it.
 
 ### Windows — MSI specifically
 
-First build the bundled `stt` Python env — `tauri.conf.json`'s
-`bundle.resources` now ships `resources/python/stt/`, so `tauri build`
-fails on a missing path without it:
+**Slim installer (default).** Bundles only the app + fonts; the runtime
+(ffmpeg, the `stt`/voice Python envs, the LLM) is fetched on first launch
+/ first use by `runtime_fetch.rs`. Needs no populated resource dirs.
 ```bash
-node scripts/build-python-runtime.mjs --pack=core
-npm run tauri build -- --bundles msi
+npm run build:slim
 ```
 Output: `src-tauri/target/release/bundle/msi/KraftReel.App_0.2.0_x64_en-US.msi`
-(~880 MB today; drops sharply once ffmpeg is trimmed and the LLM model
-moves to a first-run fetch — see section 8.1 and `docs/`).
+(~20 MB). The app is inert until `components.json`'s asset URLs/checksums
+are published by the release pipeline — see `docs/RUNTIME-PACKS.md`.
+
+**Full installer (offline).** Bundles the whole runtime, no first-run
+download. Populate the resource dirs first:
+```bash
+npm run fetch-resources
+node scripts/build-python-runtime.mjs --pack=all
+npm run build:full
+```
+Output: the same path, ~2–3 GB. Ship both from CI — slim for everyone,
+full for air-gapped users.
 Drop `-- --bundles msi` to also get the NSIS `.exe` installer
 (`bundle/nsis/*-setup.exe`) alongside it — `targets: "all"` builds both by
 default. First MSI build downloads the WiX Toolset v3 automatically

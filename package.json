@@ -8,7 +8,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "fetch-resources": "node scripts/fetch-dev-resources.mjs"
+    "fetch-resources": "node scripts/fetch-dev-resources.mjs",
+    "build-runtime": "node scripts/build-python-runtime.mjs",
+    "pack-components": "node scripts/pack-components.mjs",
+    "build:slim": "tauri build --bundles msi",
+    "build:full": "tauri build --config src-tauri/tauri.full.conf.json --bundles msi"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -203,7 +203,7 @@ async fn burn_one_segment(job: SegmentJob, on_seconds: impl Fn(f64) + Send + 'st
     let filter = format!(
         "ass='{}':fontsdir='{}'",
         escape_ffmpeg_filter_path(&ass_path),
-        escape_ffmpeg_filter_path(crate::bin_paths::fonts_dir())
+        escape_ffmpeg_filter_path(&crate::bin_paths::fonts_dir())
     );
     let output_path = unique_temp_path(&format!("segment-{}", job.index), "mp4");
     let output_path_arg = cli_path(&output_path);

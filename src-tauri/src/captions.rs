@@ -1140,7 +1140,7 @@ pub async fn burn_captions(
     let ass_filter = format!(
         "ass='{}':fontsdir='{}'",
         escape_ffmpeg_filter_path(&ass_path),
-        escape_ffmpeg_filter_path(crate::bin_paths::fonts_dir())
+        escape_ffmpeg_filter_path(&crate::bin_paths::fonts_dir())
     );
     let encoder = best_encoder().await;
 

@@ -85,6 +85,15 @@ pub const MALE_ENGLISH_VOICE: &str = "en_US-hfc_male-medium";
 /// resources, unlike the STT/media-ai models which are left to
 /// per-machine setup.
 fn piper_voice_path(app: &AppHandle, voice_id: &str) -> Result<PathBuf, String> {
+    // A downloaded `python-voice` runtime component carries the Piper
+    // voices under `runtime/tts-models/en/` (see components.json).
+    let downloaded = crate::runtime_fetch::runtime_dir()
+        .join("tts-models")
+        .join("en")
+        .join(format!("{voice_id}.onnx"));
+    if downloaded.exists() {
+        return Ok(downloaded);
+    }
     if let Ok(resource_dir) = app.path().resource_dir() {
         let candidate = resource_dir.join("tts-models").join("en").join(format!("{voice_id}.onnx"));
         if candidate.exists() {

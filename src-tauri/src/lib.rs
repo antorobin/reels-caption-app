@@ -44,6 +44,7 @@ mod music_gen;
 mod pipeline;
 mod proc_cleanup;
 mod python_env;
+mod runtime_fetch;
 mod scheduler;
 mod segments;
 mod slang;
@@ -132,7 +133,8 @@ pub fn run() {
             // Order matters: clear out anything orphaned by a *previous*
             // run first, then set up the job object that keeps *this*
             // run's own children from ever doing the same.
-            proc_cleanup::kill_orphaned_processes(&[bin_paths::ffmpeg_path(), bin_paths::ffprobe_path()]);
+            let (ffmpeg, ffprobe) = (bin_paths::ffmpeg_path(), bin_paths::ffprobe_path());
+            proc_cleanup::kill_orphaned_processes(&[&ffmpeg, &ffprobe]);
             proc_cleanup::init_kill_on_exit();
 
             tray::init(app.handle())?;
@@ -195,6 +197,9 @@ pub fn run() {
             model_fetch::check_optional_models,
             model_fetch::optional_models_missing,
             model_fetch::download_optional_models,
+            runtime_fetch::list_runtime_components,
+            runtime_fetch::missing_core_components,
+            runtime_fetch::download_runtime_component,
             music_gen::suggest_background_music,
             music_gen::finalize_background_music,
             scheduler::list_scheduled_posts,
