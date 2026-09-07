@@ -2848,11 +2848,23 @@ and variables → Actions*:
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — only needed if that key was
   generated with a password (it wasn't, by default, per the note above).
 
-This workflow hasn't been run end-to-end yet in this repo (that needs an
-actual tag push, a real CI run, and a real published release — not
-something to trigger speculatively) — built from Tauri's own documented,
-standard `tauri-action` recipe for exactly this use case, but worth
-watching the first real run closely rather than assuming it's flawless.
+**Real findings from this workflow's actual first run** (tagging v0.2.0):
+all 3 platforms failed `tauri build` immediately, for two real, since-fixed
+gaps — not something to have assumed away from just reading Tauri's docs:
+- **Ubuntu**: `alsa-sys`'s build script failed outright — this app's
+  live-dictation/mic-recording work (added after this workflow was first
+  written) pulls in `cpal`, which links against ALSA on Linux and needs
+  its real headers, not just its runtime library. Fixed by adding
+  `libasound2-dev` to the existing apt-get install line (alongside
+  webkit2gtk/appindicator/librsvg/patchelf).
+- **All 3 platforms**: `tauri build` hard-failed with `resource path
+  "resources\tts-models" doesn't exist` — `tauri.conf.json`'s declared
+  bundle resources (`resources/bin`, `resources/llama`,
+  `resources/tts-models`) are real files this repo deliberately never
+  commits (section 3's whole `dev-resources.tar.gz` mechanism exists
+  *because* of that), so a fresh CI checkout starts with none of them.
+  Fixed by adding an `npm run fetch-resources` step (same script a local
+  dev setup already runs) right after `npm ci`, before the build.
 
 **What this workflow does NOT cover**: the large asset archives
 (`dev-resources.tar.gz`, `optional-models.tar.gz`) are a separate,

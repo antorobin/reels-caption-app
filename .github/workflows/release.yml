@@ -43,11 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies (webview + tray icon support)
+      - name: Install Linux dependencies (webview + tray icon + audio-capture support)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
 
       - uses: actions/setup-node@v4
         with:
@@ -61,6 +61,18 @@ jobs:
 
       - name: Install npm dependencies
         run: npm ci
+
+      # tauri.conf.json's bundle.resources (resources/bin, resources/llama,
+      # resources/tts-models) are real files this repo deliberately doesn't
+      # commit (see README section 3 / scripts/fetch-dev-resources.mjs) --
+      # a fresh CI checkout has none of them, and `tauri build` hard-fails
+      # if a declared resource path doesn't exist on disk. Fetches the same
+      # dev-resources.tar.gz a local dev setup would, from this repo's
+      # current *latest* release (the one this workflow's own tag push is
+      # about to supersede, so its dev-resources.tar.gz is always the most
+      # recent one published, whatever version it's actually named after).
+      - name: Fetch bundled ffmpeg/LLM/TTS resources
+        run: npm run fetch-resources
 
       - uses: tauri-apps/tauri-action@v0
         env:
