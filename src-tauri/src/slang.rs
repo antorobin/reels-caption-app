@@ -55,7 +55,7 @@ fn normalize_token(token: &str) -> Option<String> {
     }
 
     let prefix = &token[..token.len() - token.trim_start_matches(is_not_alnum).len()];
-    let suffix = &token[token.len() - token.trim_end_matches(is_not_alnum).len()..];
+    let suffix = &token[token.trim_end_matches(is_not_alnum).len()..];
 
     // Match the original's casing style: ALL CAPS stays all caps, a
     // capitalized first letter stays capitalized (rest lowercase, since
