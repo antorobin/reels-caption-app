@@ -3,7 +3,8 @@
 // filled-in `components.json` for upload to the GitHub Release.
 //
 //   node scripts/build-python-runtime.mjs --pack=all   # produce resources/python/*
-//   # ...also drop a minimal ffmpeg in resources/bin/ and llama.cpp + gguf in resources/llama/
+//   npm run fetch-resources                            # resources/llama, resources/tts-models
+//   # ...put a librubberband-capable ffmpeg/ffprobe in resources/bin/
 //   node scripts/pack-components.mjs --out dist/components --version 2026.1
 //
 // Output (dist/components/):
@@ -14,10 +15,12 @@
 //   components.json                <- src-tauri/components.json with url/sha256/size/version filled
 //
 // CI uploads all of these as assets on the same Release the updater reads.
+// Pure Node (no `rm`/`cp` shell-outs) so it runs on the windows-latest
+// runner as-is; only `tar` is external (bsdtar ships with Windows 10+).
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, createReadStream } from "node:fs";
+import { cpSync, createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,22 +29,21 @@ const ROOT = resolve(HERE, "..");
 const SRC_TAURI = join(ROOT, "src-tauri");
 const RES = join(SRC_TAURI, "resources");
 
-const args = Object.fromEntries(
-  process.argv.slice(2).map((a, i, all) => {
-    if (!a.startsWith("--")) return [];
-    const k = a.replace(/^--/, "");
-    const v = all[i + 1] && !all[i + 1].startsWith("--") ? all[i + 1] : true;
-    return [k, v];
-  }).filter((x) => x.length),
-);
+const argv = process.argv.slice(2);
+const args = {};
+for (let i = 0; i < argv.length; i++) {
+  if (!argv[i].startsWith("--")) continue;
+  const k = argv[i].slice(2);
+  args[k] = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true;
+}
 
 const OUT = resolve(ROOT, args.out || "dist/components");
 const VERSION = args.version || new Date().toISOString().slice(0, 10);
 const RELEASE_BASE =
   args["release-base"] || "https://github.com/antorobin/reels-caption-app/releases/latest/download";
 
-// id -> { archive, tar: [cwd, ...paths] }  (paths relative to cwd; archive
-// contents land at the root so runtime_fetch's `unpack_to` maps cleanly)
+// id -> pack recipe. `entries` are relative to `cwd`; archive contents
+// land at the archive root so `runtime_fetch`'s `unpack_to` maps cleanly.
 const PACKS = {
   ffmpeg: { archive: "ffmpeg-win-x64.tar.gz", cwd: join(RES, "bin"), entries: ["."] },
   "python-stt": { archive: "python-stt-win-x64.tar.gz", cwd: join(RES, "python"), entries: ["stt"] },
@@ -50,7 +52,7 @@ const PACKS = {
     // two source roots -> stage a temp tree so the archive is one flat unpack
     staged: [
       [join(RES, "python"), ["tts", "media-ai", "voice-clone"]],
-      [RES, ["tts-models/en"]],
+      [RES, [join("tts-models", "en")]],
     ],
     archiveRootEntries: ["python", "tts-models"],
   },
@@ -65,7 +67,6 @@ function sha256(file) {
 }
 
 function tar(archivePath, cwd, entries) {
-  // bsdtar/GNU tar: gzip by extension. Keep it deterministic-ish.
   execFileSync("tar", ["-czf", archivePath, "-C", cwd, ...entries], { stdio: "inherit" });
 }
 
@@ -83,21 +84,20 @@ for (const c of manifest.components) {
 
   if (pack.staged) {
     const stage = join(OUT, `_stage-${c.id}`);
-    execFileSync("rm", ["-rf", stage], { stdio: "ignore" });
-    mkdirSync(stage, { recursive: true });
+    rmSync(stage, { recursive: true, force: true });
     for (const [srcRoot, dirs] of pack.staged) {
       for (const d of dirs) {
         const from = join(srcRoot, d);
-        if (!existsSync(from)) throw new Error(`missing ${from} — build the runtime first`);
+        if (!existsSync(from)) throw new Error(`missing ${from} — build the runtime / fetch resources first`);
         const to = join(stage, d);
         mkdirSync(dirname(to), { recursive: true });
-        execFileSync("cp", ["-r", from, to], { stdio: "inherit" });
+        cpSync(from, to, { recursive: true });
       }
     }
     tar(archivePath, stage, pack.archiveRootEntries);
-    execFileSync("rm", ["-rf", stage], { stdio: "ignore" });
+    rmSync(stage, { recursive: true, force: true });
   } else {
-    if (!existsSync(pack.cwd)) throw new Error(`missing ${pack.cwd} — build the runtime first`);
+    if (!existsSync(pack.cwd)) throw new Error(`missing ${pack.cwd} — build the runtime / fetch resources first`);
     tar(archivePath, pack.cwd, pack.entries);
   }
 
@@ -111,4 +111,4 @@ for (const c of manifest.components) {
 }
 
 writeFileSync(join(OUT, "components.json"), JSON.stringify(manifest, null, 2) + "\n");
-console.log(`\nWrote ${join(OUT, "components.json")} — upload it plus the .tar.gz files as Release assets.`);
+console.log(`\nWrote ${join(OUT, "components.json")} — upload it LAST (after the .tar.gz files).`);

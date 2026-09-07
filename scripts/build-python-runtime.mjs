@@ -20,7 +20,7 @@
 // `bundle.resources` (see docs/RUNTIME-PACKS.md) and rebuild the MSI.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, createWriteStream } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -133,10 +133,65 @@ async function buildEnv(name) {
     run(py, ["-m", "pip", "install", "--only-binary=:all:", "-r", reqPath]);
   }
 
-  // 3. shrink: strip pip's caches, __pycache__, and bundled tests -- these
-  //    add hundreds of MB and nothing at runtime needs them.
+  // 3. shrink: nothing at runtime needs pip's cache, bytecode caches,
+  //    packages' bundled test suites, or the pip/setuptools trees
+  //    themselves (we never install at runtime). Skippable with --no-prune.
   run(py, ["-m", "pip", "cache", "purge"], { stdio: "ignore" });
-  console.log(`  ${name} built. Prune __pycache__/tests before packing (see docs/RUNTIME-PACKS.md).`);
+  if (process.argv.includes("--no-prune")) {
+    console.log(`  ${name} built (unpruned).`);
+    return;
+  }
+  const before = dirSizeMB(prefix);
+  pruneEnv(prefix);
+  console.log(`  ${name} built + pruned: ${before} MB -> ${dirSizeMB(prefix)} MB`);
+}
+
+function pruneEnv(prefix) {
+  const sp = join(prefix, "Lib", "site-packages");
+  for (const junk of ["pip", "setuptools", "pkg_resources", "_distutils_hack"]) {
+    rmSync(join(sp, junk), { recursive: true, force: true });
+  }
+  rmSync(join(prefix, "Scripts"), { recursive: true, force: true });
+  walkRemove(prefix, (name, isDir) => isDir && (name === "__pycache__" || name === "tests" || name === "test"));
+}
+
+function walkRemove(dir, matchFn) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (matchFn(e.name, e.isDirectory())) {
+      rmSync(p, { recursive: true, force: true });
+    } else if (e.isDirectory()) {
+      walkRemove(p, matchFn);
+    }
+  }
+}
+
+function dirSizeMB(dir) {
+  let total = 0;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) total += dirSizeMB(p) * 1e6;
+    else {
+      try {
+        total += statSync(p).size;
+      } catch {
+        /* gone */
+      }
+    }
+  }
+  return Math.round(total / 1e6);
 }
 
 const targets = parseArgs();

@@ -1,23 +1,28 @@
-# Cuts a signed, OTA-updatable GitHub Release automatically whenever a
-# version tag is pushed -- the "no manual `tauri build` per OS, no
-# hand-assembled latest.json" version of section 9.2's release process in
-# the README. Uses tauri-apps/tauri-action, the standard GitHub Actions
-# wrapper for Tauri releases: it runs `tauri build` on each OS in the
-# matrix, signs the output when the signing env vars below are present,
-# creates (or reuses) the GitHub Release for this tag, uploads every
-# installer as a release asset, and generates + uploads the `latest.json`
-# manifest tauri-plugin-updater's endpoint (tauri.conf.json) reads from --
-# all in one push, matching "no manual work" for cutting a release.
+# Cuts a GitHub Release on a version tag: the slim installer, the runtime
+# component packs it downloads at first run, and (for air-gapped users)
+# the fully-bundled installer.
 #
-# One-time setup this workflow can't do for you (by design -- the whole
-# point of keeping the signing private key out of the repo): add these as
-# repo secrets under Settings -> Secrets and variables -> Actions:
-#   TAURI_SIGNING_PRIVATE_KEY          the *contents* of ~/.tauri/reels-caption-app.key
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD only if that key was generated with a password (it wasn't, by default -- see README section 9.2)
+# Flow:
+#   slim        -> tauri-action builds the ~6 MB MSI (default tauri.conf.json
+#                  bundles app + fonts only), signs it, CREATES the release,
+#                  uploads the MSI + latest.json for the OTA updater.
+#   components  -> builds the Python envs + a librubberband-capable ffmpeg +
+#                  the LLM pack, runs pack-components.mjs (tarballs + SHA-256
+#                  + a filled components.json pinned to THIS release's tag),
+#                  uploads them all. runtime_fetch.rs fetches these.
+#   full        -> the same app bundled with the whole runtime, uploaded as
+#                  KraftReel-Full-<tag>-x64.msi.
 #
-# To cut a release: bump `version` in src-tauri/tauri.conf.json and
-# package.json, commit, then `git tag v0.2.0 && git push origin v0.2.0`.
-# The pushed tag's name becomes the release's tag/name directly.
+# Windows-only for now: the component packs are win-x64. macOS/Linux slim
+# installers need their own packs -- a follow-up.
+#
+# One-time repo secrets (Settings -> Secrets and variables -> Actions),
+# same as before -- the signing key stays out of the repo by design:
+#   TAURI_SIGNING_PRIVATE_KEY           contents of the tauri signer key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  only if the key has a password
+#
+# Cut a release: bump `version` in src-tauri/tauri.conf.json + package.json,
+# commit, then `git tag v0.3.0 && git push origin v0.3.0`.
 
 name: Release
 
@@ -25,63 +30,33 @@ on:
   push:
     tags:
       - "v*.*.*"
-  # Lets you re-run this by hand from the Actions tab (e.g. to retry a
-  # failed platform) without needing to push a new tag.
   workflow_dispatch:
 
-jobs:
-  release:
-    # This repo's default GITHUB_TOKEN permissions are read-only (a repo
-    # setting, not something this file could see) -- confirmed directly by
-    # v0.2.0's first real signed run: the build/sign/bundle steps all
-    # succeeded, then release creation itself failed with "Resource not
-    # accessible by integration". `contents: write` is exactly (and only)
-    # what tauri-action needs to create the release and upload assets.
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: "macos-latest"
-          - platform: "ubuntu-22.04"
-          - platform: "windows-latest"
+permissions:
+  contents: write
 
-    runs-on: ${{ matrix.platform }}
+env:
+  # components.json points here so it's pinned to this exact release, not
+  # whatever /latest/ resolves to mid-rollout.
+  RELEASE_BASE: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
+
+jobs:
+  # ---------------------------------------------------------------- slim --
+  slim:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Linux dependencies (webview + tray icon + audio-capture support)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - run: npm ci
 
-      - name: Install npm dependencies
-        run: npm ci
-
-      # tauri.conf.json's bundle.resources (resources/bin, resources/llama,
-      # resources/tts-models) are real files this repo deliberately doesn't
-      # commit (see README section 3 / scripts/fetch-dev-resources.mjs) --
-      # a fresh CI checkout has none of them, and `tauri build` hard-fails
-      # if a declared resource path doesn't exist on disk. Fetches the same
-      # dev-resources.tar.gz a local dev setup would, from this repo's
-      # current *latest* release (the one this workflow's own tag push is
-      # about to supersede, so its dev-resources.tar.gz is always the most
-      # recent one published, whatever version it's actually named after).
-      - name: Fetch bundled ffmpeg/LLM/TTS resources
-        run: npm run fetch-resources
-
+      # No `fetch-resources` here -- the slim installer bundles nothing
+      # heavy. The default tauri.conf.json's bundle.resources is just fonts.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -90,6 +65,96 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "KraftReel.App ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install this version. Already-installed copies will offer this update automatically."
+          releaseBody: |
+            Slim installer (~6 MB) — the speech/media runtime downloads on first launch.
+            KraftReel-Full-*.msi bundles everything for offline installs.
+            Installed copies update themselves via latest.json.
           releaseDraft: false
           prerelease: false
+          args: --bundles msi
+
+  # ---------------------------------------------------------- components --
+  components:
+    runs-on: windows-latest
+    needs: slim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+
+      # LLM (llama.cpp + Qwen gguf) and the Piper voices come from the
+      # existing dev-resources archive; ffmpeg from it too, then overwritten.
+      - name: Fetch LLM + Piper resources
+        run: npm run fetch-resources
+
+      # A real prebuilt ffmpeg that includes librubberband (tts.rs's
+      # emotion pitch-shift needs it) + libass + libx264 -- stock
+      # gyan.dev/BtbN "essentials" builds omit rubberband. ~90 MB static,
+      # vs the 242 MB full build fetch-resources ships. A from-source
+      # --disable-everything build (docs/MINIMAL-FFMPEG.md) can shave it
+      # further later.
+      - name: Swap in a librubberband ffmpeg
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL -o ff.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+          7z x ff.zip -off >/dev/null
+          d=$(find ff -maxdepth 1 -type d -name 'ffmpeg-*')
+          cp "$d/bin/ffmpeg.exe" "$d/bin/ffprobe.exe" src-tauri/resources/bin/
+          ./src-tauri/resources/bin/ffmpeg.exe -hide_banner -filters | grep -E 'rubberband|ass ' || (echo "ffmpeg missing a required filter" && exit 1)
+
+      - name: Build the Python runtime envs
+        run: node scripts/build-python-runtime.mjs --pack=all
+
+      - name: Pack components
+        run: node scripts/pack-components.mjs --out dist/components --version ${{ github.ref_name }} --release-base ${{ env.RELEASE_BASE }}
+
+      # Archives first, then the manifest -- so a client that reads
+      # components.json never points at an asset that isn't up yet.
+      - name: Upload component archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ github.ref_name }}" dist/components/*.tar.gz --clobber
+          gh release upload "${{ github.ref_name }}" dist/components/components.json --clobber
+
+  # --------------------------------------------------------------- full --
+  full:
+    runs-on: windows-latest
+    needs: slim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+
+      - name: Fetch bundled ffmpeg/LLM/Piper resources
+        run: npm run fetch-resources
+      - name: Build the Python runtime envs
+        run: node scripts/build-python-runtime.mjs --pack=all
+
+      - name: Build the full installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run build:full
+
+      - name: Upload the full installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          src=$(find src-tauri/target/release/bundle/msi -name '*_x64_en-US.msi' | head -1)
+          dst="KraftReel-Full-${{ github.ref_name }}-x64.msi"
+          cp "$src" "$dst"
+          gh release upload "${{ github.ref_name }}" "$dst" --clobber

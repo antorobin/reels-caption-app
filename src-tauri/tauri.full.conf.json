@@ -3,6 +3,8 @@
   "//": "Overlay for the OFFLINE 'KraftReel-Full' build: bundles the whole runtime into the installer so it works with no first-run download. Use with: npm run tauri build -- --config src-tauri/tauri.full.conf.json --bundles msi",
   "//2": "Requires the resource dirs to be populated first: `npm run fetch-resources` (ffmpeg, llama+gguf, Piper voice) and `node scripts/build-python-runtime.mjs --pack=all` (python/*). The default tauri.conf.json ships none of this -- the slim installer fetches it via runtime_fetch.rs.",
   "bundle": {
+    "//": "The slim job already produces the signed OTA artifacts + latest.json; the full installer is a plain download, so it doesn't need the signing key in CI.",
+    "createUpdaterArtifacts": false,
     "resources": {
       "resources/bin/*": "bin/",
       "resources/llama/*": "llama/",

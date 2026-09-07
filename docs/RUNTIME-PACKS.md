@@ -90,15 +90,31 @@ and full builds take the same code path.
 
 ## Build & publish (CI)
 
-```bash
-node scripts/build-python-runtime.mjs --pack=all     # resources/python/*
-npm run fetch-resources                               # resources/bin, resources/llama, resources/tts-models
-# ...replace resources/bin/{ffmpeg,ffprobe}.exe with a minimal build (docs/MINIMAL-FFMPEG.md)
-node scripts/pack-components.mjs --out dist/components --version <YYYY.N>
-```
-`pack-components.mjs` writes the `.tar.gz` archives, computes SHA-256s,
-and emits a filled `components.json`. `release.yml` uploads all of them as
-assets on the same Release the updater already reads. Until that runs, a
-slim build's `components.json` has empty checksums and the downloader
-refuses every component (override with
-`REELS_CAPTION_APP_ALLOW_UNVERIFIED_COMPONENTS=1` for local testing).
+`.github/workflows/release.yml` runs on a `v*.*.*` tag:
+
+| Job | Does | Uploads |
+|---|---|---|
+| `slim` | `tauri-action` builds the ~6 MB MSI, signs it, **creates the release** | `KraftReel.App_<v>_x64_en-US.msi`, `latest.json` |
+| `components` | `fetch-resources` → swap in a BtbN librubberband ffmpeg → `build-python-runtime.mjs --pack=all` → `pack-components.mjs` | `*-win-x64.tar.gz`, then `components.json` (last) |
+| `full` | `fetch-resources` + `--pack=all` + `build:full` | `KraftReel-Full-<v>-x64.msi` |
+
+`pack-components.mjs` writes the `.tar.gz` archives, computes SHA-256s, and
+emits a `components.json` with every `url` **pinned to this release's tag**
+(`--release-base .../releases/download/<tag>`) and real checksums.
+Archives upload before the manifest so a client never reads a manifest
+pointing at an asset that isn't up yet.
+
+Measured pack sizes (from a local run):
+
+| Component | Compressed |
+|---|---|
+| `ffmpeg` | 175 MB (242 MB full build) → ~90 MB with the CI's BtbN swap |
+| `python-stt` | 114 MB |
+| `llm` | 473 MB (the gguf doesn't compress) |
+| `python-voice` | ~1 GB (built only in CI / `--pack=all`) |
+
+To run one locally: `node scripts/build-python-runtime.mjs --pack=all` (or
+`--pack=core`), `npm run fetch-resources`, then
+`node scripts/pack-components.mjs --out dist/components --version vX.Y.Z`.
+A slim build whose `components.json` still has empty checksums refuses
+every component unless `REELS_CAPTION_APP_ALLOW_UNVERIFIED_COMPONENTS=1`.
