@@ -55,7 +55,8 @@
       "resources/llama/*": "llama/",
       "resources/tts-models": "tts-models",
       "resources/fonts/*": "fonts/",
-      "resources/fonts-license/*": "fonts-license/"
+      "resources/fonts-license/*": "fonts-license/",
+      "resources/python/stt": "python/stt"
     }
   },
   "plugins": {

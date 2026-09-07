@@ -116,13 +116,18 @@ real detail (troubleshooting, why it's built this way, what's optional).
    Pulls ffmpeg, llama.cpp + the local LLM, Piper's English voice, the
    Tamil Whisper checkpoint, and the OpenVoice checkpoint from this repo's
    GitHub Release — no separate downloads to go hunt down (section 3.1).
-4. **Set up the conda environments** for whichever features you need —
-   these install actual Python packages, not just files, so
-   `fetch-resources` can't do this part:
-   - `stt` (required for any transcription) — section 2
-   - `tts` (voiceover generation) — section 2.6
-   - `media-ai` (voice-over sync, vocal emphasis, speaker diarization) — section 2.4
-   - `voice-clone` (matching a generated voiceover to the original speaker) — section 2.7
+4. **Get the Python environments** for whichever features you need — these
+   install actual Python packages, not just files, so `fetch-resources`
+   can't do this part. Either build the bundled relocatable envs (no
+   conda, and this is also what a `tauri build` bundles — see section 8.1):
+   ```bash
+   node scripts/build-python-runtime.mjs --pack=core     # stt -- required for any transcription
+   node scripts/build-python-runtime.mjs --pack=extras   # tts + media-ai + voice-clone
+   ```
+   …or set up system conda envs the old way (`stt` section 2, `tts`
+   section 2.6, `media-ai` section 2.4, `voice-clone` section 2.7).
+   `src-tauri/src/python_env.rs` prefers a bundled env and falls back to
+   conda, so either works for `tauri dev`.
 5. **Configure Firebase auth** — required; this is the app's first screen,
    nothing else works until this is set up (section 4).
 6. **Run it:**
@@ -2173,10 +2178,16 @@ produces every relevant format for whichever platform runs it.
 
 ### Windows — MSI specifically
 
+First build the bundled `stt` Python env — `tauri.conf.json`'s
+`bundle.resources` now ships `resources/python/stt/`, so `tauri build`
+fails on a missing path without it:
 ```bash
+node scripts/build-python-runtime.mjs --pack=core
 npm run tauri build -- --bundles msi
 ```
-Output: `src-tauri/target/release/bundle/msi/KraftReel.App_0.2.0_x64_en-US.msi`.
+Output: `src-tauri/target/release/bundle/msi/KraftReel.App_0.2.0_x64_en-US.msi`
+(~880 MB today; drops sharply once ffmpeg is trimmed and the LLM model
+moves to a first-run fetch — see section 8.1 and `docs/`).
 Drop `-- --bundles msi` to also get the NSIS `.exe` installer
 (`bundle/nsis/*-setup.exe`) alongside it — `targets: "all"` builds both by
 default. First MSI build downloads the WiX Toolset v3 automatically
